@@ -1,0 +1,63 @@
+# Dependencies
+node_modules/
+yarn.lock
+pnpm-lock.yaml
+bun.lockb
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.cer
+*.pfx
+*.p12
+
+# Runtime data (WhatsApp auth, user uploads, exports, logs)
+auth-state/
+uploads/
+exports/
+logs/
+*.log
+
+# Build / test output
+dist/
+build/
+out/
+coverage/
+.nyc_output/
+lib-cov/
+
+# OS generated
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.*.sw[a-p]
+*.sublime-project
+*.sublime-workspace
+.project
+.classpath
+.settings/
+
+# Misc
+.node_repl_history
+.eslintcache
+*.tgz
+*.pid
+*.seed
+*.pid.lock
+pids/
+*.sqlite
+*.sqlite3
+*.db-journal
+.cache/

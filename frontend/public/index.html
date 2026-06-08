@@ -1,0 +1,1014 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WA Control — Supervisor Desk (MVP)</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 0; background: #f4f4f5; color: #111; }
+    header { background: #111; color: #fff; padding: 12px 20px; display: flex; align-items: center; justify-content: space-between; }
+    .container { max-width: 1200px; margin: 20px auto; padding: 0 16px; }
+    .card { background: #fff; border: 1px solid #e5e5e7; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #eee; }
+    th { background: #fafafa; }
+    button { padding: 6px 12px; border: 1px solid #333; background: #fff; cursor: pointer; border-radius: 4px; }
+    button.primary { background: #111; color: #fff; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; }
+    input, select { padding: 6px; border: 1px solid #ccc; border-radius: 4px; }
+    .status { padding: 2px 8px; border-radius: 999px; font-size: 12px; }
+    .status.active { background: #d1fae5; }
+    .status.offline { background: #fee2e2; }
+    .status.warming { background: #fef3c7; }
+    .nav { display: flex; gap: 8px; }
+    .nav button { border: none; background: #222; color: #ddd; padding: 4px 10px; }
+    .nav button.active { background: #fff; color: #111; }
+    pre { background: #f8f8f8; padding: 8px; overflow: auto; font-size: 12px; }
+    .qr { font-family: monospace; background: #fff; padding: 12px; border: 2px solid #000; display: inline-block; white-space: pre; }
+  </style>
+</head>
+<body>
+  <header>
+    <div><strong>WA Control</strong> — Rocket WS Supervisor Desk (MVP)</div>
+    <div id="user-info"></div>
+  </header>
+
+  <div class="container">
+    <div id="login-panel" class="card">
+      <h3>Login (supervisor@local / admin123)</h3>
+      <div class="row">
+        <input id="login-email" value="supervisor@local" />
+        <input id="login-pass" type="password" value="admin123" />
+        <button onclick="doLogin()" class="primary">Login</button>
+      </div>
+      <small>Token stored in memory for this session.</small>
+    </div>
+
+    <div id="main" style="display:none">
+      <div class="nav">
+        <button onclick="showTab('ports')">Ports</button>
+        <button onclick="showTab('accounts')">Accounts</button>
+        <button onclick="showTab('desk')">Chat Desk</button>
+        <button onclick="showTab('blasts')">Blasts</button>
+        <button onclick="showTab('laqun')">Group Pulls</button>
+        <button onclick="listEmulators()" title="Manage cloud emulators / Waydroid instances">Emulators</button>
+        <button onclick="showTab('warming')">Warming</button>
+        <button onclick="showTab('contacts')">Contacts</button>
+        <button onclick="showTab('proxies')">Proxies</button>
+        <button onclick="showTab('materials')">Materials</button>
+        <button onclick="showTab('live')">Live Sessions</button>
+      </div>
+
+      <!-- PORTS -->
+      <div id="tab-ports" class="tab card">
+        <h3>Ports</h3>
+        <button onclick="purchasePort()">Purchase / Allocate Port</button>
+        <table id="ports-table"><thead><tr><th>ID</th><th>Type</th><th>Status</th><th>Expires</th><th>Used</th><th>Notes</th></tr></thead><tbody></tbody></table>
+      </div>
+
+      <!-- ACCOUNTS -->
+      <div id="tab-accounts" class="tab card" style="display:none">
+        <h3>WS Accounts</h3>
+        <div class="row">
+          <input id="import-phones" placeholder="+1...,+2... (comma)" style="flex:1" />
+          <button onclick="importAccounts()">Import</button>
+          <button onclick="loadAccounts()">Refresh</button>
+        </div>
+        <table id="accounts-table"><thead><tr><th>Phone</th><th>Status</th><th>Port</th><th>Actions</th></tr></thead><tbody></tbody></table>
+        <div style="margin-top:8px">
+          <button onclick="connectSelected()">Connect / QR Login (selected)</button>
+          <span id="qr-area"></span>
+        </div>
+      </div>
+
+      <!-- CHAT DESK -->
+      <div id="tab-desk" class="tab card" style="display:none">
+        <h3>Chat Desk (MVP)</h3>
+        <div class="row">
+          <select id="desk-account" onchange="loadDeskConversations()" style="min-width:180px"></select>
+          <button onclick="loadDeskConversations()">Load Convos</button>
+          <button onclick="refreshDeskMessages()">Refresh Messages</button>
+        </div>
+
+        <div class="row" style="margin-top:12px; align-items:flex-start">
+          <div style="flex:1; min-width:200px">
+            <strong>Conversations</strong>
+            <div id="desk-convos" style="max-height:240px; overflow:auto; border:1px solid #ddd; padding:4px; font-size:13px"></div>
+          </div>
+          <div style="flex:1; min-width:200px">
+            <strong>Contacts / Fans</strong>
+            <button onclick="loadDeskContacts()" style="font-size:11px;padding:2px 6px">Load</button>
+            <div id="desk-contacts" style="max-height:240px; overflow:auto; border:1px solid #ddd; padding:4px; font-size:13px"></div>
+          </div>
+          <div style="flex:2; min-width:320px">
+            <strong>Chat with <span id="desk-current-phone"></span></strong>
+            <div id="desk-messages" style="height:220px; overflow:auto; background:#fafafa; border:1px solid #ddd; padding:8px; font-size:13px; white-space:pre-wrap"></div>
+            <div class="row" style="margin-top:6px">
+              <input id="desk-input" style="flex:1" placeholder="Type message..." onkeydown="if(event.key==='Enter') deskSend()" />
+              <select id="desk-quick" style="max-width:160px" title="Quick replies from materials"></select>
+              <button onclick="insertQuickReply()" style="padding:4px 8px">Insert</button>
+              <button onclick="deskSend()" class="primary">Send</button>
+              <button onclick="deskMarkRead()">Mark Read</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- BLASTS -->
+      <div id="tab-blasts" class="tab card" style="display:none">
+        <h3>Blasts (Fan + Cold)</h3>
+        <div class="row">
+          <select id="blast-type" onchange="toggleBlastType()">
+            <option value="fan">Fan Blast</option>
+            <option value="cold">Cold Blast</option>
+          </select>
+          <input id="blast-name" placeholder="Campaign name" />
+          <input id="blast-message" placeholder="Message template" style="flex:1" />
+          <select id="blast-account"></select>
+          <input id="blast-cold-phones" placeholder="Cold phones: +1,+2,..." style="flex:1; display:none" />
+          <button onclick="createBlast()">Create &amp; Run Blast</button>
+        </div>
+        <button onclick="loadBlasts()" style="margin-top:8px">Refresh Campaigns</button>
+        <table id="blasts-table"><thead><tr><th>Name</th><th>Type</th><th>Status</th><th>Sent/Failed</th><th>Actions</th></tr></thead><tbody></tbody></table>
+      </div>
+
+      <!-- GROUP PULLS -->
+      <div id="tab-laqun" class="tab card" style="display:none">
+        <h3>Group Pulls</h3>
+        <div class="row">
+          <select id="laqun-admin" style="min-width:160px"></select>
+          <input id="laqun-subject" placeholder="Group subject / name" style="flex:1" />
+          <input id="laqun-targets" placeholder="Target phones +1,+2 (comma) or count" style="flex:1" />
+          <button onclick="createLaqunTask()">Create Pull Task</button>
+          <button onclick="loadLaqun()">Refresh</button>
+        </div>
+        <div style="margin:8px 0">
+          <button onclick="executeSelectedLaqun()">Execute Selected (create group + invite)</button>
+          <input id="laqun-add-phones" placeholder="Extra phones to add (selected pull)" style="width:220px" />
+          <button onclick="addMembersToSelectedLaqun()">Add Members</button>
+        </div>
+        <table id="laqun-table"><thead><tr><th>Subject</th><th>Admin</th><th>Status</th><th>Added</th><th>Invite / Link</th><th>Actions</th></tr></thead><tbody></tbody></table>
+        <div id="laqun-invite-area" style="margin-top:8px;font-family:monospace;font-size:12px"></div>
+      </div>
+
+      <!-- WARMING -->
+      <div id="tab-warming" class="tab card" style="display:none">
+        <h3>Warming Pool + Tasks</h3>
+        <button onclick="enterSelectedWarming()">Move selected offline to Warming Pool</button>
+        <button onclick="loadWarming()">Refresh Tasks</button>
+        <table id="warming-table"><thead><tr><th>Phone</th><th>Status</th><th>Progress</th><th>Mode</th><th>Actions</th></tr></thead><tbody></tbody></table>
+      </div>
+
+      <!-- CONTACTS -->
+      <div id="tab-contacts" class="tab card" style="display:none">
+        <h3>Contacts</h3>
+        <div class="row">
+          <input id="contact-import" placeholder="+1555...,name1;+1556,name2" style="flex:1" />
+          <button onclick="importContactsUI()">Import</button>
+          <button onclick="loadContacts()">Refresh</button>
+        </div>
+        <table id="contacts-table"><thead><tr><th>Phone</th><th>Name</th><th>Tags</th><th>Source</th></tr></thead><tbody></tbody></table>
+      </div>
+
+      <!-- PROXIES -->
+      <div id="tab-proxies" class="tab card" style="display:none">
+        <h3>Proxies</h3>
+        <div class="row">
+          <input id="px-name" placeholder="name" value="sg-res-1"/>
+          <select id="px-type"><option>socks5</option><option>http</option></select>
+          <input id="px-host" placeholder="host" value="127.0.0.1"/>
+          <input id="px-port" type="number" value="1080" style="width:80px"/>
+          <button onclick="addProxy()">Add Proxy</button>
+        </div>
+        <table id="proxies-table"><thead><tr><th>Name</th><th>Type</th><th>Host:Port</th><th>Status</th><th>Rate</th><th>Actions</th></tr></thead><tbody></tbody></table>
+      </div>
+
+      <!-- MATERIALS -->
+      <div id="tab-materials" class="tab card" style="display:none">
+        <h3>Materials</h3>
+        <div class="row">
+          <select id="mat-type"><option>nickname</option><option>message</option><option>avatar</option></select>
+          <input id="mat-name" placeholder="name"/>
+          <input id="mat-content" placeholder="content or url (for non-avatar)" style="flex:1"/>
+          <input id="mat-file" type="file" style="max-width:180px" />
+          <button onclick="addMaterial()">Add</button>
+        </div>
+        <table id="materials-table"><thead><tr><th>Type</th><th>Name</th><th>Content</th><th></th></tr></thead><tbody></tbody></table>
+      </div>
+
+      <!-- LIVE -->
+      <div id="tab-live" class="tab card" style="display:none">
+        <h3>Live Sessions + Realtime</h3>
+        <button onclick="loadSessions()">Refresh Sessions</button>
+        <pre id="live-log"></pre>
+        <small>Connect via /sessions/connect to see QR events (emitted to all sockets for MVP)</small>
+      </div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    let TOKEN = null;
+    let CURRENT_USER = null;
+    const API = '/api/v1';
+
+    async function doLogin() {
+      const email = document.getElementById('login-email').value;
+      const password = document.getElementById('login-pass').value;
+      const res = await fetch(API + '/auth/login', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({email, password})
+      });
+      const data = await res.json();
+      if (data.token) {
+        TOKEN = data.token;
+        CURRENT_USER = data.user;
+        document.getElementById('login-panel').style.display = 'none';
+        document.getElementById('main').style.display = 'block';
+        document.getElementById('user-info').innerHTML = `${CURRENT_USER.name} (${CURRENT_USER.role}) <button onclick="logout()">Logout</button>`;
+        loadAll();
+        initLiveSocket();  // enable live updates for desk, QR, status
+      } else {
+        alert('Login failed: ' + (data.error || ''));
+      }
+    }
+
+    function logout() {
+      TOKEN = null; CURRENT_USER = null;
+      location.reload();
+    }
+
+    function authHeaders() {
+      return { 'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json' };
+    }
+
+    async function loadAll() {
+      loadPorts();
+      loadAccounts();
+      loadWarming();
+      loadContacts();
+      loadProxies();
+      loadMaterials();
+      loadSessions();
+    }
+
+    function showTab(tab) {
+      document.querySelectorAll('.tab').forEach(el => el.style.display = 'none');
+      document.getElementById('tab-' + tab).style.display = 'block';
+      if (tab === 'ports') loadPorts();
+      if (tab === 'accounts') loadAccounts();
+      if (tab === 'desk') {
+        const sel = document.getElementById('desk-account');
+        if (sel && sel.options.length <= 1) loadDeskAccounts();
+        setTimeout(loadDeskContacts, 100);
+        setTimeout(loadQuickReplies, 120);
+      }
+      if (tab === 'blasts') {
+        setTimeout(loadBlastAccounts, 50);
+        loadBlasts();
+      }
+      if (tab === 'laqun') {
+        setTimeout(loadLaqunAccounts, 50);
+        loadLaqun();
+      }
+      if (tab === 'warming') loadWarming();
+      if (tab === 'contacts') loadContacts();
+      if (tab === 'proxies') loadProxies();
+      if (tab === 'materials') loadMaterials();
+      if (tab === 'live') loadSessions();
+    }
+
+    async function loadPorts() {
+      const res = await fetch(API + '/ports', { headers: authHeaders() });
+      const json = await res.json();
+      const tbody = document.querySelector('#ports-table tbody');
+      tbody.innerHTML = '';
+      (json.data || []).forEach(p => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${p.id.slice(0,8)}</td><td>${p.type}</td><td>${p.status}</td><td>${p.expires_at ? new Date(p.expires_at).toLocaleDateString() : ''}</td><td>${p.numbers_assigned}/${p.max_numbers}</td><td>${p.notes || ''}</td>`;
+        tbody.appendChild(tr);
+      });
+    }
+
+    async function purchasePort() {
+      const res = await fetch(API + '/ports/purchase', { method:'POST', headers: authHeaders(), body: JSON.stringify({type:'normal', notes:'From UI'}) });
+      if (res.ok) { alert('Port purchased'); loadPorts(); } else alert('Failed');
+    }
+
+    let selectedAccountId = null;
+
+    async function loadAccounts() {
+      const res = await fetch(API + '/accounts', { headers: authHeaders() });
+      const json = await res.json();
+      const tbody = document.querySelector('#accounts-table tbody');
+      tbody.innerHTML = '';
+      (json.data || []).forEach(a => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${a.phone}</td><td><span class="status ${a.status}">${a.status}</span></td><td>${a.port_id ? a.port_id.slice(0,6) : ''}</td>
+          <td>
+            <button onclick="selectForConnect('${a.id}', this)">Select</button>
+            <button onclick="connectAccount('${a.id}')">Connect (QR)</button>
+            <button onclick="connectAccount('${a.id}', true)" title="Use pairing code - ideal for cloud emulator / phone-less registration">Connect (Cloud/Pairing)</button>
+            <button onclick="provisionCloudEmulator('${a.id}')" title="Provision Waydroid instance for this number (cloud / phone-less)">Cloud Provision</button>
+            <button onclick="enterWarming('${a.id}')">Warm</button>
+            <button onclick="openInDesk('${a.id}', '${a.phone}')">Desk Chat</button>
+          </td>`;
+        tbody.appendChild(tr);
+      });
+    }
+
+    function selectForConnect(id, btn) {
+      selectedAccountId = id;
+      document.querySelectorAll('#accounts-table button').forEach(b => b.style.fontWeight = '');
+      btn.style.fontWeight = 'bold';
+    }
+
+    async function importAccounts() {
+      const val = document.getElementById('import-phones').value.trim();
+      if (!val) return;
+      const phones = val.split(',').map(p => p.trim()).filter(Boolean).map(ph => ({phone: ph}));
+      const res = await fetch(API + '/accounts/import', { method:'POST', headers: authHeaders(), body: JSON.stringify({accounts: phones}) });
+      const j = await res.json();
+      alert('Import: ' + JSON.stringify(j));
+      loadAccounts();
+    }
+
+    async function provisionCloudEmulator(accountId) {
+      if (!confirm('This will attempt to provision a Waydroid instance for this account and start the linking flow. Continue?')) return;
+
+      const res = await fetch(API + '/cloud/emulators/provision', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ ws_account_id: accountId })
+      });
+      const j = await res.json();
+
+      if (j.data && j.data.pairingCode) {
+        const qrEl = document.getElementById('qr-area');
+        qrEl.innerHTML = `
+          <div class="qr" style="font-size:1.05em; white-space:pre-line;">
+            WAYDROID PAIRING CODE:\n\n
+            <strong style="font-size:1.6em; letter-spacing:4px;">${j.data.pairingCode}</strong>\n\n
+            ${j.data.instructions || 'Enter this code inside the WhatsApp app running in the newly provisioned Waydroid session.'}
+          </div>
+        `;
+      } else {
+        alert('Provisioning response: ' + JSON.stringify(j));
+      }
+    }
+
+    async function connectAccount(accountId, usePairingCode = false) {
+      // For cloud / phone-less operation, pass usePairingCode=true
+      // This returns an 8-digit code to enter in the WhatsApp app inside your cloud emulator
+      // instead of scanning a QR.
+      const body = { accountId };
+      if (usePairingCode) body.usePairingCode = true;
+
+      const connectRes = await fetch(API + '/sessions/connect', {
+        method: 'POST', headers: authHeaders(), body: JSON.stringify(body)
+      });
+      const j = await connectRes.json();
+      const qrEl = document.getElementById('qr-area');
+
+      if (j.pairingCode) {
+        // Phone-less / cloud emulator flow
+        qrEl.innerHTML = `
+          <div class="qr" style="font-size:1.05em; white-space:pre-line;">
+            PAIRING CODE (cloud / phone-less):\n\n
+            <strong style="font-size:1.5em; letter-spacing:3px;">${j.pairingCode}</strong>\n\n
+            Enter this code inside WhatsApp\n
+            running in your cloud Android emulator.\n
+            (No QR scan required)
+          </div>
+        `;
+      } else if (j.qr) {
+        qrEl.innerHTML = `<div class="qr">SCAN THIS QR WITH WHATSAPP:\n\n${j.qr}</div>`;
+      } else {
+        qrEl.textContent = 'Connecting... status: ' + (j.status || JSON.stringify(j));
+        setTimeout(loadAccounts, 2000);
+      }
+    }
+
+    async function connectSelected() {
+      if (!selectedAccountId) { alert('Select an account first'); return; }
+      connectAccount(selectedAccountId);
+    }
+
+    async function enterWarming(accountId) {
+      // Support mode choice (normal vs fast_warm). Defaults to normal.
+      const mode = prompt('Mode? normal (default) or fast_warm', 'normal') || 'normal';
+      const targetDays = mode === 'fast_warm' ? 5 : 10;
+      await fetch(API + '/warming/enter', { method:'POST', headers: authHeaders(), body: JSON.stringify({ws_account_id: accountId, mode, target_days: targetDays}) });
+      alert(`Entered warming pool (${mode}, ${targetDays} days) - job scheduled`);
+      loadWarming(); loadAccounts();
+    }
+
+    async function enterSelectedWarming() {
+      if (!selectedAccountId) { alert('select account'); return; }
+      enterWarming(selectedAccountId);
+    }
+
+    async function loadWarming() {
+      const res = await fetch(API + '/warming/tasks', { headers: authHeaders() });
+      const json = await res.json();
+      const tbody = document.querySelector('#warming-table tbody');
+      tbody.innerHTML = '';
+
+      // Simple monitoring summary
+      const inWarm = (json.data || []).filter(t => t.status === 'executing' || t.status === 'pending').length;
+      const completed = (json.data || []).filter(t => t.status === 'completed').length;
+      const headerRow = document.createElement('tr');
+      headerRow.innerHTML = `<td colspan="5" style="font-weight:bold;background:#f8f8f8">In warming: ${inWarm} | Completed: ${completed} | (4.3 monitoring)</td>`;
+      tbody.appendChild(headerRow);
+
+      (json.data || []).forEach(t => {
+        const tr = document.createElement('tr');
+        const progress = `${t.progress_days || 0}/${t.target_days || 10}`;
+        let actions = '';
+        if (t.status === 'executing' || t.status === 'pending') {
+          actions = `<button onclick="pauseWarmingTask('${t.id}')">Pause</button>`;
+        }
+        tr.innerHTML = `<td>${t.phone}</td><td>${t.status}</td><td>${progress}</td><td>${t.mode}</td><td>${actions}</td>`;
+        tbody.appendChild(tr);
+      });
+    }
+
+    async function pauseWarmingTask(taskId) {
+      await fetch(API + `/warming/tasks/${taskId}/pause`, { method:'POST', headers: authHeaders() });
+      alert('Warming paused');
+      loadWarming();
+    }
+
+    async function listEmulators() {
+      const res = await fetch(API + '/cloud/emulators', { headers: authHeaders() });
+      const json = await res.json();
+      console.log('Cloud Emulators:', json.data);
+      alert('Emulators logged to console. Open DevTools to inspect.\n\n' + 
+            (json.data || []).map(e => `${e.id.slice(0,8)} | ${e.provider} | ${e.status} | account:${e.ws_account_id?.slice(0,8)}`).join('\n') || 'None');
+    }
+
+    async function loadProxies() {
+      const res = await fetch(API + '/proxies', { headers: authHeaders() });
+      const json = await res.json();
+      const tbody = document.querySelector('#proxies-table tbody');
+      tbody.innerHTML = '';
+      (json.data || []).forEach(p => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${p.name}</td><td>${p.type}</td><td>${p.host}:${p.port}</td><td>${p.status}</td><td>${p.success_rate}</td>
+          <td><button onclick="testProxy('${p.id}')">Test</button></td>`;
+        tbody.appendChild(tr);
+      });
+    }
+
+    async function addProxy() {
+      const body = {
+        name: document.getElementById('px-name').value,
+        type: document.getElementById('px-type').value,
+        host: document.getElementById('px-host').value,
+        port: parseInt(document.getElementById('px-port').value)
+      };
+      await fetch(API + '/proxies', { method:'POST', headers: authHeaders(), body: JSON.stringify(body) });
+      loadProxies();
+    }
+
+    async function testProxy(id) {
+      const res = await fetch(API + '/proxies/' + id + '/test', { method:'POST', headers: authHeaders() });
+      const j = await res.json();
+      alert('Proxy test: ' + JSON.stringify(j.data));
+    }
+
+    async function loadMaterials() {
+      const res = await fetch(API + '/materials', { headers: authHeaders() });
+      const json = await res.json();
+      const tbody = document.querySelector('#materials-table tbody');
+      tbody.innerHTML = '';
+      (json.data || []).forEach(m => {
+        const tr = document.createElement('tr');
+        let contentCell = m.content;
+        if (m.type === 'avatar' && m.content) {
+          contentCell = `<img src="/uploads/${m.content}" style="max-height:40px; max-width:40px; vertical-align:middle; margin-right:4px;" /> ${m.content}`;
+        }
+        tr.innerHTML = `<td>${m.type}</td><td>${m.name}</td><td>${contentCell}</td><td><button onclick="delMaterial('${m.id}')">x</button></td>`;
+        tbody.appendChild(tr);
+      });
+    }
+
+    async function addMaterial() {
+      const type = document.getElementById('mat-type').value;
+      const fileInput = document.getElementById('mat-file');
+      const hasFile = type === 'avatar' && fileInput && fileInput.files.length > 0;
+
+      if (hasFile) {
+        const fd = new FormData();
+        fd.append('type', type);
+        fd.append('name', document.getElementById('mat-name').value || '');
+        fd.append('file', fileInput.files[0]);
+        await fetch(API + '/materials', { method:'POST', headers: { 'Authorization': 'Bearer ' + TOKEN }, body: fd });
+      } else {
+        const body = {
+          type,
+          name: document.getElementById('mat-name').value,
+          content: document.getElementById('mat-content').value
+        };
+        await fetch(API + '/materials', { method:'POST', headers: authHeaders(), body: JSON.stringify(body) });
+      }
+      // reset file input
+      if (fileInput) fileInput.value = '';
+      loadMaterials();
+    }
+
+    async function delMaterial(id) {
+      await fetch(API + '/materials/' + id, { method:'DELETE', headers: authHeaders() });
+      loadMaterials();
+    }
+
+    // === BLASTS functions ===
+    async function loadBlasts() {
+      const res = await fetch(API + '/blasts', { headers: authHeaders() });
+      const json = await res.json();
+      const tbody = document.querySelector('#blasts-table tbody');
+      tbody.innerHTML = '';
+      (json.data || []).forEach(b => {
+        const tr = document.createElement('tr');
+        const sent = b.stats?.sent || 0;
+        const failed = b.stats?.failed || 0;
+        tr.innerHTML = `<td>${b.name}</td><td>${b.type}</td><td>${b.status}</td><td>${sent}/${failed}</td>
+          <td>
+            <button onclick="pauseBlast('${b.id}')">Pause</button>
+            <button onclick="exportUnsent('${b.id}')">Export Unsent</button>
+          </td>`;
+        tbody.appendChild(tr);
+      });
+    }
+
+    async function createFanBlast() {
+      const name = document.getElementById('blast-name').value || 'Fan Blast';
+      const message = document.getElementById('blast-message').value;
+      const wsId = document.getElementById('blast-account').value;
+      if (!message || !wsId) { alert('Message and account required'); return; }
+
+      const res = await fetch(API + '/blasts/fan', {
+        method: 'POST', headers: authHeaders(),
+        body: JSON.stringify({ name, message_template: message, ws_account_id: wsId })
+      });
+      if (res.ok) {
+        alert('Blast created and started (demo)');
+        loadBlasts();
+      } else {
+        const err = await res.json();
+        alert('Error: ' + (err.error || 'failed'));
+      }
+    }
+
+    async function pauseBlast(id) {
+      await fetch(API + `/blasts/${id}/status`, { method:'PATCH', headers: authHeaders(), body: JSON.stringify({ status: 'paused' }) });
+      loadBlasts();
+    }
+
+    async function exportUnsent(id) {
+      const res = await fetch(API + `/blasts/${id}/unsent`, { headers: authHeaders() });
+      const json = await res.json();
+      alert(`Exported ${json.count} unsent recipients (demo JSON)`);
+      console.log(json.data);
+    }
+
+    async function loadBlastAccounts() {
+      const sel = document.getElementById('blast-account');
+      if (!sel) return;
+      sel.innerHTML = '<option value="">-- select WS account --</option>';
+      const res = await fetch(API + '/accounts', { headers: authHeaders() });
+      const json = await res.json();
+      (json.data || []).forEach(a => {
+        const opt = document.createElement('option');
+        opt.value = a.id;
+        opt.textContent = `${a.phone} (${a.status})`;
+        sel.appendChild(opt);
+      });
+    }
+
+    function toggleBlastType() {
+      const type = document.getElementById('blast-type').value;
+      const cold = document.getElementById('blast-cold-phones');
+      if (cold) cold.style.display = (type === 'cold') ? 'block' : 'none';
+    }
+
+    async function createBlast() {
+      const type = document.getElementById('blast-type').value;
+      const name = document.getElementById('blast-name').value || (type === 'cold' ? 'Cold Blast' : 'Fan Blast');
+      const message = document.getElementById('blast-message').value;
+      const wsId = document.getElementById('blast-account').value;
+      if (!message || !wsId) { alert('Message and account required'); return; }
+
+      let url = API + '/blasts/fan';
+      let body = { name, message_template: message, ws_account_id: wsId };
+
+      if (type === 'cold') {
+        url = API + '/blasts/cold';
+        const phonesRaw = document.getElementById('blast-cold-phones').value || '';
+        const phones = phonesRaw.split(',').map(p => p.trim()).filter(Boolean);
+        body = { name, message_template: message, ws_account_id: wsId, target_phones: phones };
+      }
+
+      const res = await fetch(url, { method: 'POST', headers: authHeaders(), body: JSON.stringify(body) });
+      if (res.ok) {
+        alert(type === 'cold' ? 'Cold blast created & started' : 'Fan blast created and started');
+        loadBlasts();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert('Error: ' + (err.error || 'failed'));
+      }
+    }
+
+    // === Group Pulls functions ===
+    let selectedLaqunId = null;
+
+    async function loadLaqunAccounts() {
+      const sel = document.getElementById('laqun-admin');
+      if (!sel) return;
+      sel.innerHTML = '<option value="">-- select admin WS (privileged) --</option>';
+      const res = await fetch(API + '/accounts', { headers: authHeaders() });
+      const json = await res.json();
+      (json.data || []).forEach(a => {
+        const opt = document.createElement('option');
+        opt.value = a.id;
+        opt.textContent = `${a.phone} (${a.status})`;
+        sel.appendChild(opt);
+      });
+    }
+
+    async function loadLaqun() {
+      const res = await fetch(API + '/group-pulls', { headers: authHeaders() });
+      const json = await res.json();
+      const tbody = document.querySelector('#laqun-table tbody');
+      tbody.innerHTML = '';
+      (json.data || []).forEach(p => {
+        const tr = document.createElement('tr');
+        const inviteCell = p.invite_link
+          ? `<a href="${p.invite_link}" target="_blank">${p.invite_code || 'link'}</a>`
+          : (p.status === 'qr_ready' || p.status === 'adding' ? 'ready (execute or add)' : '-');
+        tr.innerHTML = `<td>${p.subject}</td><td>${p.admin_phone || p.admin_ws_account_id?.slice(0,8)}</td>
+          <td><span class="status ${p.status}">${p.status}</span></td>
+          <td>${p.added_count || 0}${p.target_count ? '/' + p.target_count : ''}</td>
+          <td>${inviteCell}</td>
+          <td>
+            <button onclick="selectLaqun('${p.id}', this)">Select</button>
+            <button onclick="executeLaqun('${p.id}')">Execute</button>
+          </td>`;
+        tbody.appendChild(tr);
+      });
+    }
+
+    function selectLaqun(id, btn) {
+      selectedLaqunId = id;
+      document.querySelectorAll('#laqun-table button').forEach(b => b.style.fontWeight = '');
+      if (btn) btn.style.fontWeight = 'bold';
+      document.getElementById('laqun-invite-area').textContent = 'Selected pull: ' + id;
+    }
+
+    async function createLaqunTask() {
+      const admin = document.getElementById('laqun-admin').value;
+      const subject = document.getElementById('laqun-subject').value || 'New Group';
+      const targetsRaw = document.getElementById('laqun-targets').value.trim();
+      if (!admin || !subject) { alert('Admin account and subject required'); return; }
+
+      let target_count = 0;
+      let target_contacts = null;
+      if (targetsRaw) {
+        if (/^\d+$/.test(targetsRaw)) {
+          target_count = parseInt(targetsRaw);
+        } else {
+          target_contacts = targetsRaw.split(',').map(p => p.trim()).filter(Boolean);
+        }
+      }
+
+      const res = await fetch(API + '/group-pulls', {
+        method: 'POST', headers: authHeaders(),
+        body: JSON.stringify({ subject, admin_ws_account_id: admin, target_count, target_contacts })
+      });
+      if (res.ok) {
+        alert('Pull task created');
+        loadLaqun();
+      } else {
+        const e = await res.json().catch(() => ({}));
+        alert('Create failed: ' + (e.error || res.status));
+      }
+    }
+
+    async function executeLaqun(id) {
+      const res = await fetch(API + `/group-pulls/${id}/execute`, { method: 'POST', headers: authHeaders() });
+      const j = await res.json();
+      if (j.data) {
+        const inv = j.invite ? `\nInvite: ${j.invite.link || j.invite.code}` : '';
+        document.getElementById('laqun-invite-area').innerHTML = `Group JID: ${j.groupJid || j.data.created_group_jid || ''}${inv ? '<br>' + inv : ''}`;
+        alert('Executed. Group created (or QR pending). Check status.');
+      } else {
+        alert('Execute: ' + (j.error || 'see console'));
+        console.log(j);
+      }
+      loadLaqun();
+    }
+
+    async function executeSelectedLaqun() {
+      if (!selectedLaqunId) { alert('Select a pull row first'); return; }
+      await executeLaqun(selectedLaqunId);
+    }
+
+    async function addMembersToSelectedLaqun() {
+      if (!selectedLaqunId) { alert('Select a pull first'); return; }
+      const raw = document.getElementById('laqun-add-phones').value || '';
+      const phones = raw.split(',').map(p => p.trim()).filter(Boolean);
+      if (!phones.length) { alert('Enter phones to add'); return; }
+      const res = await fetch(API + `/group-pulls/${selectedLaqunId}/add-members`, {
+        method: 'POST', headers: authHeaders(), body: JSON.stringify({ phones })
+      });
+      const j = await res.json();
+      alert(j.success ? `Add requested for ${phones.length}` : (j.error || 'failed'));
+      loadLaqun();
+    }
+
+    async function loadSessions() {
+      const res = await fetch(API + '/sessions', { headers: authHeaders() });
+      const json = await res.json();
+      document.getElementById('live-log').textContent = JSON.stringify(json, null, 2);
+    }
+
+    async function loadContacts() {
+      const res = await fetch(API + '/contacts', { headers: authHeaders() });
+      const json = await res.json();
+      const tbody = document.querySelector('#contacts-table tbody');
+      tbody.innerHTML = '';
+      (json.data || []).forEach(c => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${c.phone}</td><td>${c.name || ''}</td><td>${(c.tags || []).join(',')}</td><td>${c.source || ''}</td>`;
+        tbody.appendChild(tr);
+      });
+    }
+
+    async function importContactsUI() {
+      const val = document.getElementById('contact-import').value.trim();
+      if (!val) return;
+      const parts = val.split(/[,;]/).map(s => s.trim()).filter(Boolean);
+      const contacts = parts.map(p => {
+        const [phone, name] = p.split(/[:\s]+/);
+        return { phone: phone || p, name: name || undefined };
+      });
+      const res = await fetch(API + '/contacts/import', { method:'POST', headers: authHeaders(), body: JSON.stringify({contacts}) });
+      const j = await res.json();
+      alert('Contacts import: ' + j.imported);
+      loadContacts();
+    }
+
+    // === CHAT DESK functions ===
+    let currentDeskAccount = null;
+    let currentDeskPhone = null;
+
+    async function loadDeskAccounts() {
+      const sel = document.getElementById('desk-account');
+      sel.innerHTML = '<option value="">-- select WS account --</option>';
+      const res = await fetch(API + '/accounts', { headers: authHeaders() });
+      const json = await res.json();
+      (json.data || []).forEach(a => {
+        const opt = document.createElement('option');
+        opt.value = a.id;
+        opt.textContent = `${a.phone} (${a.status})`;
+        sel.appendChild(opt);
+      });
+      // also populate blast select if present
+      const blastSel = document.getElementById('blast-account');
+      if (blastSel && blastSel.options.length <= 1) {
+        blastSel.innerHTML = '<option value="">-- select WS account --</option>';
+        (json.data || []).forEach(a => {
+          const opt = document.createElement('option');
+          opt.value = a.id;
+          opt.textContent = `${a.phone} (${a.status})`;
+          blastSel.appendChild(opt);
+        });
+      }
+      loadQuickReplies();
+    }
+
+    async function loadDeskConversations() {
+      const sel = document.getElementById('desk-account');
+      currentDeskAccount = sel.value;
+      if (!currentDeskAccount) return;
+
+      const res = await fetch(API + `/accounts/${currentDeskAccount}/conversations`, { headers: authHeaders() });
+      const json = await res.json();
+      const container = document.getElementById('desk-convos');
+      container.innerHTML = '';
+
+      (json.data || []).forEach(c => {
+        const div = document.createElement('div');
+        div.style.cursor = 'pointer';
+        div.style.padding = '3px 4px';
+        div.style.borderBottom = '1px solid #eee';
+        div.innerHTML = `${c.contact_phone} <small>(${c.unread_count || 0} unread)</small>`;
+        div.onclick = () => selectDeskConversation(c.contact_phone);
+        container.appendChild(div);
+      });
+
+      if (!json.data || json.data.length === 0) {
+        container.innerHTML = '<em>No conversations yet. Send or receive a message.</em>';
+      }
+
+      // auto load contacts for the desk when convos are loaded
+      loadDeskContacts();
+      loadQuickReplies();
+    }
+
+    async function loadDeskContacts() {
+      let url = '/contacts?limit=30';
+      if (currentDeskAccount) {
+        url += `&assigned_ws_account_id=${currentDeskAccount}`;
+      }
+      const res = await fetch(API + url, { headers: authHeaders() });
+      const json = await res.json();
+      const container = document.getElementById('desk-contacts');
+      container.innerHTML = '';
+
+      const contacts = (json.data || []).slice(0, 30);
+      contacts.forEach(c => {
+        const div = document.createElement('div');
+        div.style.cursor = 'pointer';
+        div.style.padding = '2px 4px';
+        div.style.borderBottom = '1px solid #f0f0f0';
+        const label = c.name ? `${c.phone} (${c.name})` : c.phone;
+        div.innerHTML = label + (c.assigned_ws_account_id === currentDeskAccount ? ' ✓' : '');
+        div.onclick = () => selectDeskConversation(c.phone);
+        container.appendChild(div);
+      });
+
+      if (contacts.length === 0) {
+        container.innerHTML = currentDeskAccount
+          ? '<em>No contacts assigned to this number yet. Chat with someone or import via Contacts tab.</em>'
+          : '<em>No contacts imported yet. Use Contacts tab or /contacts/import.</em>';
+      }
+    }
+
+    async function selectDeskConversation(phone) {
+      currentDeskPhone = phone;
+      document.getElementById('desk-current-phone').textContent = phone;
+      await refreshDeskMessages();
+    }
+
+    async function refreshDeskMessages() {
+      if (!currentDeskAccount || !currentDeskPhone) return;
+      const res = await fetch(API + `/accounts/${currentDeskAccount}/chat/${encodeURIComponent(currentDeskPhone)}`, { headers: authHeaders() });
+      const json = await res.json();
+      const box = document.getElementById('desk-messages');
+      box.innerHTML = '';
+
+      (json.data || []).forEach(m => {
+        const line = document.createElement('div');
+        const prefix = m.direction === 'in' ? '← ' : '→ ';
+        line.textContent = `${prefix}${m.text || '[media]'}`;
+        line.style.marginBottom = '3px';
+        line.style.color = m.direction === 'in' ? '#0066cc' : '#333';
+        box.appendChild(line);
+      });
+
+      box.scrollTop = box.scrollHeight;
+    }
+
+    async function deskSend() {
+      if (!currentDeskAccount || !currentDeskPhone) { alert('Select account and conversation first'); return; }
+      const input = document.getElementById('desk-input');
+      const text = input.value.trim();
+      if (!text) return;
+
+      await fetch(API + `/accounts/${currentDeskAccount}/send`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ to: currentDeskPhone + '@s.whatsapp.net', text })
+      });
+
+      input.value = '';
+      // refresh after short delay
+      setTimeout(refreshDeskMessages, 600);
+    }
+
+    async function deskMarkRead() {
+      if (!currentDeskAccount || !currentDeskPhone) return;
+      await fetch(API + `/accounts/${currentDeskAccount}/chat/${encodeURIComponent(currentDeskPhone)}/read`, {
+        method: 'POST', headers: authHeaders()
+      });
+      loadDeskConversations();
+    }
+
+    async function loadQuickReplies() {
+      const sel = document.getElementById('desk-quick');
+      if (!sel) return;
+      sel.innerHTML = '<option value="">-- quick replies --</option>';
+      try {
+        const res = await fetch(API + '/materials?type=message', { headers: authHeaders() });
+        const json = await res.json();
+        (json.data || []).forEach(m => {
+          const opt = document.createElement('option');
+          opt.value = m.content || '';
+          opt.textContent = (m.name || m.content || '').slice(0, 40);
+          sel.appendChild(opt);
+        });
+      } catch (e) { /* materials optional */ }
+    }
+
+    function insertQuickReply() {
+      const sel = document.getElementById('desk-quick');
+      const input = document.getElementById('desk-input');
+      if (!sel || !input || !sel.value) return;
+      if (input.value && !input.value.endsWith(' ')) input.value += ' ';
+      input.value += sel.value;
+      // optional: auto-send on double use or leave for user to edit+send
+    }
+
+    function openInDesk(accountId, phone) {
+      // Switch to desk tab and preselect
+      showTab('desk');
+      setTimeout(async () => {
+        const sel = document.getElementById('desk-account');
+        sel.value = accountId;
+        currentDeskAccount = accountId;
+        await loadDeskConversations();
+        // auto open the convo for this phone if exists, or create on first message
+        currentDeskPhone = phone;
+        document.getElementById('desk-current-phone').textContent = phone;
+        // try loading messages (may be empty)
+        setTimeout(refreshDeskMessages, 200);
+      }, 80);
+    }
+
+    // Realtime socket for live desk updates (wa:message, qr, etc.)
+    let liveSocket = null;
+    function initLiveSocket() {
+      if (liveSocket || typeof io === 'undefined') return;
+      try {
+        liveSocket = io();
+        liveSocket.on('connect', () => {
+          console.log('[socket] connected for realtime desk');
+        });
+        liveSocket.on('wa:message', (data) => {
+          const deskTab = document.getElementById('tab-desk');
+          const isDeskVisible = deskTab && deskTab.style.display !== 'none';
+
+          if (isDeskVisible && currentDeskAccount === data.accountId) {
+            // If viewing this exact chat, append live
+            if (currentDeskPhone === data.phone) {
+              const box = document.getElementById('desk-messages');
+              if (box) {
+                const line = document.createElement('div');
+                const prefix = data.direction === 'in' ? '← ' : '→ ';
+                const g = data.isGroup ? '[G] ' : '';
+                line.textContent = `${prefix}${g}${data.text || '[media]'}`;
+                line.style.marginBottom = '3px';
+                line.style.color = data.direction === 'in' ? '#0066cc' : '#333';
+                box.appendChild(line);
+                box.scrollTop = box.scrollHeight;
+              }
+            } else {
+              // Different convo on same account → refresh list so unread counts update
+              loadDeskConversations();
+            }
+          }
+        });
+        liveSocket.on('wa:qr', ({ accountId, phone, qr }) => {
+          const qrEl = document.getElementById('qr-area');
+          if (qrEl) {
+            qrEl.innerHTML = `<div class="qr">LIVE QR for ${phone} (account ${accountId.slice(0,8)}):\n\n${qr}</div>`;
+          }
+        });
+
+        liveSocket.on('wa:pairing_code', ({ accountId, phone, code }) => {
+          const qrEl = document.getElementById('qr-area');
+          if (qrEl) {
+            qrEl.innerHTML = `
+              <div class="qr" style="font-size:1.05em; white-space:pre-line;">
+                LIVE PAIRING CODE for ${phone}:\n\n
+                <strong style="font-size:1.5em; letter-spacing:3px;">${code}</strong>\n\n
+                Enter in WhatsApp app (cloud emulator)
+              </div>
+            `;
+          }
+        });
+        liveSocket.on('wa:connected', ({ accountId, phone }) => {
+          console.log('[socket] connected', phone);
+          // Refresh accounts/sessions views if visible
+          const accTab = document.getElementById('tab-accounts');
+          if (accTab && accTab.style.display !== 'none') loadAccounts();
+          const liveTab = document.getElementById('tab-live');
+          if (liveTab && liveTab.style.display !== 'none') loadSessions();
+        });
+        liveSocket.on('wa:disconnected', () => {
+          const accTab = document.getElementById('tab-accounts');
+          if (accTab && accTab.style.display !== 'none') loadAccounts();
+        });
+      } catch (e) {
+        console.warn('Socket init failed', e);
+      }
+    }
+
+    // Auto load if token somehow persisted (demo only)
+    window.onload = () => {
+      console.log('WA Control MVP UI ready. Login to begin.');
+    };
+  </script>
+</body>
+</html>
