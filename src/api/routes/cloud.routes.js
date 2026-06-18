@@ -7,6 +7,13 @@ import {
   stopEmulator,
   linkEmulator,
   shutdownEmulator,
+  acquireNumbers,
+  acquireGrizzlyNumbers,
+  listAcquiredNumbers,
+  markNumberRegistered,
+  getProviderBalance,
+  getOrderStatus,
+  releaseNumber,
 } from '../controllers/cloud.controller.js';
 import { authenticate, requireRole } from '../middleware/auth.js';
 
@@ -42,5 +49,20 @@ router.post('/cloud/emulators/:id/start', authenticate, requireRole('supervisor'
 router.post('/cloud/emulators/:id/stop', authenticate, requireRole('supervisor'), stopEmulator);
 router.post('/cloud/emulators/:id/link', authenticate, requireRole('supervisor'), linkEmulator);
 router.post('/cloud/emulators/:id/shutdown', authenticate, requireRole('supervisor'), shutdownEmulator);
+
+// Pluggable virtual number acquisition (Grizzly, manual, future providers)
+// Use provider: 'grizzly' or 'manual' in the body.
+router.post('/cloud/numbers/acquire', authenticate, requireRole('supervisor'), acquireNumbers);
+router.post('/cloud/numbers/acquire-grizzly', authenticate, requireRole('supervisor'), acquireGrizzlyNumbers); // legacy alias
+
+router.get('/cloud/numbers', authenticate, requireRole('supervisor'), listAcquiredNumbers);
+
+// Confirm that WhatsApp registration (SMS code entry) has been completed for a transitional number
+router.post('/cloud/numbers/:id/mark-registered', authenticate, requireRole('supervisor'), markNumberRegistered);
+
+// Provider balance, status polling, and release/cancel
+router.get('/cloud/numbers/balance', authenticate, requireRole('supervisor'), getProviderBalance);
+router.get('/cloud/numbers/:id/status', authenticate, requireRole('supervisor'), getOrderStatus);
+router.post('/cloud/numbers/:id/release', authenticate, requireRole('supervisor'), releaseNumber);
 
 export default router;

@@ -7,6 +7,7 @@ import {
   deleteProxy,
   testProxy,
   runHealthCheck,
+  importProxies,
 } from '../controllers/proxies.controller.js';
 import { authenticate, requireRole } from '../middleware/auth.js';
 
@@ -20,5 +21,9 @@ router.delete('/proxies/:id', authenticate, requireRole('supervisor'), deletePro
 
 router.post('/proxies/:id/test', authenticate, requireRole('supervisor'), testProxy);
 router.post('/proxies/health-check', authenticate, requireRole('supervisor'), runHealthCheck);
+
+// Bulk import from uploaded/proxy credential text file
+// Body: { text: "full file contents", defaultType?: "socks5"|"http", namePrefix?: string, region?: string }
+router.post('/proxies/import', authenticate, requireRole('supervisor'), importProxies);
 
 export default router;

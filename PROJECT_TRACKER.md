@@ -130,6 +130,47 @@ See [TASKS.md](TASKS.md) for full agent-assignable breakdown, estimates, and par
 
 (Previous changes are captured in the Retrospective above. Future entries will be appended chronologically here.)
 
+### 2026-06 (Multi-provider support + Manual "already WhatsApp registered" flow + link-only mode)
+
+- **Change/Feature**: Addressed the reality that Grizzly is only one provider and that the critical "WhatsApp code" step (initial registration SMS inside the emulator) is often done manually or with external tooling (user's own `--account <phone>` launcher + provider dashboard/API for the code). 
+  - Introduced proper pluggable Number Providers.
+  - Added explicit "Manual" path for numbers where the user has already completed WhatsApp registration outside the system.
+  - Added `linkOnly` / assume-registered mode so the provision flow skips emulator start/install when the user handled registration themselves.
+  - Added "Mark Registered" confirmation so the system knows a transitional number is ready for Baileys linking.
+  - Port allocation remains strictly on successful `connection === 'open'`.
+
+- **Key files**:
+  - Providers: [src/providers/numbers/base.provider.js](src/providers/numbers/base.provider.js), [grizzly.provider.js](src/providers/numbers/grizzly.provider.js), [manual.provider.js](src/providers/numbers/manual.provider.js), [index.js](src/providers/numbers/index.js) (registry + factory).
+  - Controller: [src/api/controllers/cloud.controller.js](src/api/controllers/cloud.controller.js) (general `acquireNumbers`, `markNumberRegistered`, generalized from previous Grizzly-only).
+  - Routes: [src/api/routes/cloud.routes.js](src/api/routes/cloud.routes.js) (`POST /cloud/numbers/acquire`, `POST /cloud/numbers/:id/mark-registered`).
+  - EmulatorService: link-only support in `provisionAndLink`.
+  - Script: [src/scripts/provision-waydroid.js](src/scripts/provision-waydroid.js) (better docs + `--link-only` / `--phone` support for the manual/external registration case).
+  - Frontend: Updated Acquire tab with provider selector + "Manual Add (already registered)" form + per-row "Mark Registered" + smarter Provision that passes `linkOnly`.
+
+This cleanly separates:
+1. Get virtual number (any provider or manual paste).
+2. Run emulator (your --account tooling) + enter WhatsApp SMS code (the "manual contact addition").
+3. Confirm registration (or use manual provider which sets the flag).
+4. Request Baileys pairing code + link (minimal account created here if needed).
+5. On success → full ws_account + port allocated.
+
+### 2026-06 (Phone-first transitional numbers + GrizzlySMS acquisition + Port on success only)
+- **Change/Feature**: Implemented simpler transitional state for cloud / SMS-acquired numbers. `ws_account` + port allocation now happens **only on successful Baileys link** (not at connect/provision time). Added phone-first support so you can acquire numbers before committing them as full operational accounts.
+  - **Status**: Done (simpler version as requested; port deferred for `phone_assoc` / `pending_verification` flows).
+  - **Responsible**:
+    - Migration: [src/db/migrations/004_phone_first_cloud_emulators.js](src/db/migrations/004_phone_first_cloud_emulators.js) (phone column + nullable ws_account_id on cloud_emulators).
+    - Service: [src/cloud/emulator.service.js](src/cloud/emulator.service.js) (createEmulatorRecord now accepts phone, linkWithPairingCode creates minimal account on-the-fly, provisionAndLink supports phone).
+    - Controller/Routes: [src/api/controllers/cloud.controller.js](src/api/controllers/cloud.controller.js) + [src/api/routes/cloud.routes.js](src/api/routes/cloud.routes.js) (provision accepts phone, new acquireGrizzlyNumbers + listAcquiredNumbers).
+    - Sessions: [src/api/controllers/sessions.controller.js](src/api/controllers/sessions.controller.js) (pairing code flows create with 'pending_verification', no port increment).
+    - Core: [src/core/sessions/SessionManager.js](src/core/sessions/SessionManager.js) (on 'open': if pending_verification/phone_assoc and no port, auto-allocate first available port + set active).
+    - CLI: [src/scripts/provision-waydroid.js](src/scripts/provision-waydroid.js) (now supports `--phone` in addition to `--account`).
+    - UI: [frontend/public/index.html](frontend/public/index.html) (new "Acquire (Grizzly)" tab + full flow).
+- **GrizzlySMS Virtual Numbers**:
+  - New integration: [src/integrations/grizzlySms.js](src/integrations/grizzlySms.js) (getNumber for service=wa, countries 12/16/63).
+  - Acquire N numbers for selected country → creates transitional `cloud_emulator` records (phone only).
+  - UI dropdown + quantity + "Acquire" + table of acquired numbers + one-click "Provision (Waydroid + Pairing)".
+  - Requires `GRIZZLY_API_KEY` env var.
+
 ### 2026-06 (Current Session - 拉群/Group Pulls 7.1 + Cold Blasts + Desk Polish)
 - **Change/Feature**: Implemented core 拉群 (group pull / 7.1) end-to-end foundation + expanded blasts to full cold (爆粉群发) + desk quick replies (8.4) + group message passthrough. Directly addresses previous Open priorities.
   - **Status**: Done (MVP functional: create/execute pulls using live admin sessions, group creation + invite code/link surfacing, add members via privileged number, BullMQ worker for adds; cold blast create + targeting by explicit phone list + same worker path; quick material message insert in CS desk; relaxed group handling in realtime).
@@ -157,11 +198,15 @@ See [TASKS.md](TASKS.md) for full agent-assignable breakdown, estimates, and par
 - Real multi-day testing with proxies + owned numbers (11.x).
 - See [TASKS.md](TASKS.md#parallelization-notes--critical-path) for ASAP path.
 
-**Current next step recommendation**: Use the new proxy scraper (`npm run scrape-proxies`) with `--test` to populate test proxies, then exercise 拉群 + cold blast + desk flows. After that, focus on real device validation or blast polish. Update tracker after each significant change.
+**Current next step recommendation**: 
+- Run `npm run migrate`.
+- Set MAX_CONCURRENT_EMULATORS=4 (or 6) for a 50-number farm.
+- In Acquire tab: load balance, acquire, use Poll Status (auto every 15s while tab open), Cancel, Mark Registered.
+- For 50 numbers you only need a small concurrent emulator pool for onboarding (emulators are shut down after successful linking; Baileys runs headless). See new concurrency guard in EmulatorService.
 
 Update this tracker on every change. Use `search_replace` or append to keep it current.
 
-**Last Updated**: 2026-06 (Waydroid provisioning controller + cloud_emulators table + metadata storage). See Change Log.
+**Last Updated**: 2026-06 (Proxies edit/delete UI + Ports/Materials explanations + Standard notification dialog system). See Change Log.
 
 ### 2026-06 (Proxy Scraper for Testing)
 - **Change/Feature**: Added GitHub-based free proxy scraper tool. Pulls from popular public lists (TheSpeedX/PROXY-List, monosans/proxy-list, jetkai/proxy-list, etc.). Supports HTTP and SOCKS5. Deduplicates, limits results, optional testing via existing ProxyService, and direct addition to DB. Includes --dry-run and CLI flags.
@@ -213,6 +258,16 @@ Update this tracker on every change. Use `search_replace` or append to keep it c
     - Still requires the host to have Waydroid properly installed and (for headless) a virtual display setup. The controller is the orchestration layer on top.
     - CLI helper: `npm run provision-waydroid -- --account <ws_account_id>` (see src/scripts/provision-waydroid.js)
     - New table + service also improve metadata storage for future automation and auditing.
+
+### 2026-06 (UI Polish: Proxies CRUD, Explanations, Notification System)
+- **Change/Feature**: Added Edit + Delete buttons to the Proxies table (full CRUD in UI). Added clear explanatory text for "Ports" (capacity tracking theory from the PDF) and "Materials" (avatars/nicks/messages for natural behavior). Created a reusable standard notification/dialog system (modal with support for alerts, confirms, and form inputs) to replace ugly native alert/prompt. Used it for Warming mode selection (normal vs fast_warm) with clean UI.
+  - **Status**: Done
+  - **Responsible Documents/Files**:
+    - Proxies UI: [frontend/public/index.html](frontend/public/index.html) (loadProxies now renders Edit/Delete, editProxy + deleteProxy functions using dialog, extended addProxy with username/password fields)
+    - Ports explanation: [frontend/public/index.html](frontend/public/index.html) (tab-ports section)
+    - Materials explanation: [frontend/public/index.html](frontend/public/index.html) (tab-materials section)
+    - Notification system: [frontend/public/index.html](frontend/public/index.html) (modal HTML + CSS + showNotification / showConfirm / showToast functions + usage in enterWarming)
+  - **Notes**: The dialog is now the standard for any future notifications/inputs (warm mode, proxy edit, confirms, toasts for success). Proxies now fully manageable from the UI (create with auth, edit, delete, test). Explanations help operators understand the PDF concepts directly in the tool. All tracked.
 
 ### 2026-06 (CSP, DevTools, and Warming Job Stability Fixes)
 - **Change/Feature**: Fixed browser CSP errors blocking inline event handlers in the static UI (onclick, onchange, etc. used throughout the desk and other tabs). Silenced noisy Chrome DevTools `/.well-known/appspecific/com.chrome.devtools.json` 404 spam. Made warming BullMQ jobs more resilient to "job stalled more than allowable limit" errors (common during long simulation steps or dev restarts).

@@ -25,6 +25,28 @@
     .nav button.active { background: #fff; color: #111; }
     pre { background: #f8f8f8; padding: 8px; overflow: auto; font-size: 12px; }
     .qr { font-family: monospace; background: #fff; padding: 12px; border: 2px solid #000; display: inline-block; white-space: pre; }
+
+    /* Standard Notification / Dialog */
+    .modal-overlay {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0,0,0,0.5); display: none; align-items: center; justify-content: center; z-index: 1000;
+    }
+    .modal {
+      background: #fff; border-radius: 8px; min-width: 320px; max-width: 90%; box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+      overflow: hidden;
+    }
+    .modal-header {
+      padding: 12px 16px; background: #111; color: #fff; font-weight: bold; display: flex; justify-content: space-between; align-items: center;
+    }
+    .modal-body { padding: 16px; }
+    .modal-footer { padding: 12px 16px; border-top: 1px solid #eee; display: flex; gap: 8px; justify-content: flex-end; }
+    .modal input, .modal select { width: 100%; padding: 6px; margin: 4px 0; box-sizing: border-box; }
+    .modal .form-group { margin-bottom: 8px; }
+    .modal .form-group label { display: block; font-size: 12px; color: #555; margin-bottom: 2px; }
+    .notification { padding: 12px; border-radius: 4px; margin-bottom: 8px; }
+    .notification.success { background: #d1fae5; color: #065f46; }
+    .notification.error { background: #fee2e2; color: #991b1b; }
+    .notification.info { background: #e0f2fe; color: #0369a1; }
   </style>
 </head>
 <body>
@@ -51,6 +73,7 @@
         <button onclick="showTab('desk')">Chat Desk</button>
         <button onclick="showTab('blasts')">Blasts</button>
         <button onclick="showTab('laqun')">Group Pulls</button>
+        <button onclick="showTab('acquire')">Acquire (Grizzly)</button>
         <button onclick="listEmulators()" title="Manage cloud emulators / Waydroid instances">Emulators</button>
         <button onclick="showTab('warming')">Warming</button>
         <button onclick="showTab('contacts')">Contacts</button>
@@ -61,7 +84,14 @@
 
       <!-- PORTS -->
       <div id="tab-ports" class="tab card">
-        <h3>Ports</h3>
+        <h3>Ports (端口)</h3>
+        <div style="font-size:13px; color:#555; margin-bottom:8px; line-height:1.3;">
+          <strong>Theory &amp; Use:</strong> Ports are the fundamental "capacity unit" (from the Rocket WS manual).
+          Each active WS number typically consumes one port. "Purchase" here is internal allocation tracking (not real sales).
+          Types: <b>normal</b> (standard 10-day warm cycle) or <b>fast_warm</b> (速养, more aggressive schedule).
+          Track purchase date, start/expiry, usage count, and notes. Warehouse ports are independent.
+          This helps with capacity planning and expiry warnings.
+        </div>
         <button onclick="purchasePort()">Purchase / Allocate Port</button>
         <table id="ports-table"><thead><tr><th>ID</th><th>Type</th><th>Status</th><th>Expires</th><th>Used</th><th>Notes</th></tr></thead><tbody></tbody></table>
       </div>
@@ -151,6 +181,60 @@
         <div id="laqun-invite-area" style="margin-top:8px;font-family:monospace;font-size:12px"></div>
       </div>
 
+      <!-- ACQUIRE NUMBERS (multi-provider + manual registration support) -->
+      <div id="tab-acquire" class="tab card" style="display:none">
+        <h3>Acquire / Add Virtual Numbers (Multi-Provider)</h3>
+
+        <h4>1. Automated acquire (e.g. Grizzly)</h4>
+        <div class="row">
+          <select id="acquire-provider" style="min-width:120px">
+            <option value="grizzly">grizzly</option>
+            <option value="hero">hero (herosms.com)</option>
+            <option value="manual">manual (already registered)</option>
+          </select>
+          <select id="grizzly-country" style="min-width:160px">
+            <option value="12">US (12)</option>
+            <option value="16">UK (16)</option>
+            <option value="63">Czech (63)</option>
+            <option value="36">Canada (36)</option>
+          </select>
+          <input id="grizzly-count" type="number" value="1" min="1" max="10" style="width:70px" />
+          <input id="grizzly-maxprice" type="number" step="0.01" placeholder="max $ (e.g. 0.99)" style="width:110px" title="Optional: only buy numbers cheaper than this (provider must support maxPrice)" />
+          <button onclick="acquireNumbers()">Acquire</button>
+        </div>
+
+        <h4>2. Manual add (you already registered WhatsApp via your --account emulator + provider SMS code)</h4>
+        <div class="row">
+          <input id="manual-phone" placeholder="+447700900123" style="flex:1" />
+          <input id="manual-notes" placeholder="notes / which provider you used" style="flex:2" />
+          <button onclick="manualAddRegistered()">Add as Registered (ready for linking)</button>
+        </div>
+
+        <div class="row" style="margin-bottom:8px">
+          <button onclick="loadGrizzlyBalance()">Refresh Grizzly Balance</button>
+          <span id="grizzly-balance" style="margin-left:12px; font-weight:bold; color:#0a0;"></span>
+        </div>
+
+        <small style="color:#666">Port allocation happens <strong>only on successful Baileys link</strong>. Use "Poll Status" to fetch SMS code, "Mark Registered" after entering it in emulator, "Cancel" to release (setStatus 8).</small>
+
+        <div style="margin-top:8px">
+          <button onclick="loadAcquiredNumbers()">Refresh</button>
+          <button onclick="listProviders()">List Providers</button>
+        </div>
+
+        <table id="acquired-table" style="margin-top:10px">
+          <thead><tr>
+            <th>Phone</th>
+            <th>Order ID</th>
+            <th>Provider</th>
+            <th>Status</th>
+            <th>SMS Code</th>
+            <th>Actions</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
       <!-- WARMING -->
       <div id="tab-warming" class="tab card" style="display:none">
         <h3>Warming Pool + Tasks</h3>
@@ -178,14 +262,35 @@
           <select id="px-type"><option>socks5</option><option>http</option></select>
           <input id="px-host" placeholder="host" value="127.0.0.1"/>
           <input id="px-port" type="number" value="1080" style="width:80px"/>
+          <input id="px-user" placeholder="username (optional)" style="width:120px"/>
+          <input id="px-pass" type="password" placeholder="password (optional)" style="width:120px"/>
           <button onclick="addProxy()">Add Proxy</button>
         </div>
+
+        <!-- Bulk upload from credential file (supports user:pass@host:port and host:port:user:pass etc.) -->
+        <div style="margin: 8px 0; padding: 8px; border: 1px dashed #666; background:#f9f9f9;">
+          <strong>Bulk import from proxy credential .txt file</strong><br>
+          <input type="file" id="proxy-file" accept=".txt,.csv" style="margin:4px 0;" />
+          <select id="import-px-type" style="width:90px"><option value="socks5">socks5</option><option value="http">http</option></select>
+          <input id="import-px-prefix" placeholder="name prefix (e.g. cheap-us-)" style="width:140px" />
+          <button onclick="importProxiesFromFile()">Upload &amp; Import</button>
+          <div id="import-result" style="font-size:12px; margin-top:4px; color:#333;"></div>
+          <div style="font-size:11px; color:#666;">Supports common formats from providers (Proxy-Cheap, IPRoyal, etc.). Duplicates (same host:port) are skipped.</div>
+        </div>
+
         <table id="proxies-table"><thead><tr><th>Name</th><th>Type</th><th>Host:Port</th><th>Status</th><th>Rate</th><th>Actions</th></tr></thead><tbody></tbody></table>
       </div>
 
       <!-- MATERIALS -->
       <div id="tab-materials" class="tab card" style="display:none">
-        <h3>Materials</h3>
+        <h3>Materials (素材库)</h3>
+        <div style="font-size:13px; color:#555; margin-bottom:8px; line-height:1.3;">
+          <strong>Theory &amp; Use:</strong> Reusable assets for making accounts look natural.
+          <b>Avatars</b>: profile pictures (uploaded, auto-resized with Sharp to 512x512). Used during warming and batch profile updates.
+          <b>Nicknames</b>: text list of display names. Randomly applied in warming / one-key ops.
+          <b>Messages</b>: templates (support simple {{vars}}). Used for quick replies in the desk and blast campaigns.
+          Materials are attributed to a creator and have usage counts. Essential for realistic 养号 and 客服台 operations.
+        </div>
         <div class="row">
           <select id="mat-type"><option>nickname</option><option>message</option><option>avatar</option></select>
           <input id="mat-name" placeholder="name"/>
@@ -206,11 +311,115 @@
     </div>
   </div>
 
+  <!-- Standard Notification / Dialog Modal -->
+  <div id="modal-overlay" class="modal-overlay" onclick="if (event.target.id === 'modal-overlay') hideModal()">
+    <div id="modal" class="modal" onclick="event.stopImmediatePropagation()">
+      <div class="modal-header">
+        <span id="modal-title">Notification</span>
+        <button onclick="hideModal()" style="background:none;border:none;color:#fff;font-size:18px;cursor:pointer;">&times;</button>
+      </div>
+      <div class="modal-body" id="modal-body"></div>
+      <div class="modal-footer" id="modal-footer"></div>
+    </div>
+  </div>
+
   <script src="/socket.io/socket.io.js"></script>
   <script>
     let TOKEN = null;
     let CURRENT_USER = null;
     const API = '/api/v1';
+
+    /* === Standard Notification / Dialog System === */
+    let modalResolve = null;
+
+    function showModal(title, bodyHTML, footerHTML) {
+      document.getElementById('modal-title').textContent = title;
+      document.getElementById('modal-body').innerHTML = bodyHTML;
+      document.getElementById('modal-footer').innerHTML = footerHTML || '';
+      document.getElementById('modal-overlay').style.display = 'flex';
+    }
+
+    function hideModal() {
+      document.getElementById('modal-overlay').style.display = 'none';
+      if (modalResolve) {
+        modalResolve(null);
+        modalResolve = null;
+      }
+    }
+
+    function showNotification(opts = {}) {
+      const { title = 'Notification', message = '', type = 'info', onConfirm, onCancel, inputs = [] } = opts;
+
+      let body = '';
+      if (message) body += `<div class="notification ${type}">${message}</div>`;
+
+      if (inputs.length) {
+        inputs.forEach((inp, i) => {
+          const id = `modal-input-${i}`;
+          body += `<div class="form-group">`;
+          body += `<label>${inp.label || inp.name}</label>`;
+          if (inp.type === 'select') {
+            body += `<select id="${id}">`;
+            (inp.options || []).forEach(o => {
+              body += `<option value="${o.value}">${o.label}</option>`;
+            });
+            body += `</select>`;
+          } else {
+            body += `<input id="${id}" type="${inp.type || 'text'}" value="${inp.value || ''}" placeholder="${inp.placeholder || ''}" />`;
+          }
+          body += `</div>`;
+        });
+      }
+
+      let footer = '';
+      if (onConfirm || onCancel || inputs.length) {
+        footer = `<button onclick="hideModal()">Cancel</button>`;
+        if (onConfirm) {
+          footer += `<button class="primary" onclick="confirmModal()">OK</button>`;
+        }
+      } else {
+        footer = `<button onclick="hideModal()">OK</button>`;
+      }
+
+      showModal(title, body, footer);
+
+      if (onConfirm) {
+        window.confirmModal = () => {
+          const values = {};
+          inputs.forEach((inp, i) => {
+            const el = document.getElementById(`modal-input-${i}`);
+            values[inp.name || `field${i}`] = el ? el.value : null;
+          });
+          hideModal();
+          onConfirm(values);
+        };
+      }
+
+      return new Promise(resolve => { modalResolve = resolve; });
+    }
+
+    function showConfirm(message, onYes) {
+      return showNotification({
+        title: 'Confirm',
+        message,
+        type: 'info',
+        onConfirm: onYes
+      });
+    }
+
+    function showToast(message, type = 'success') {
+      // Simple non-modal toast using the notification style
+      const toast = document.createElement('div');
+      toast.className = `notification ${type}`;
+      toast.style.position = 'fixed';
+      toast.style.bottom = '20px';
+      toast.style.right = '20px';
+      toast.style.zIndex = '2000';
+      toast.style.boxShadow = '0 2px 10px rgba(0,0,0,0.2)';
+      toast.innerHTML = message;
+      document.body.appendChild(toast);
+      setTimeout(() => toast.remove(), 3000);
+    }
 
     async function doLogin() {
       const email = document.getElementById('login-email').value;
@@ -231,6 +440,16 @@
       } else {
         alert('Login failed: ' + (data.error || ''));
       }
+    }
+
+    function copyToClipboard(text) {
+      navigator.clipboard.writeText(text).then(() => {
+        const btns = document.querySelectorAll('button');
+        // simple feedback on any recent button if possible
+        console.log('Copied verification code to clipboard:', text);
+      }).catch(() => {
+        prompt('Copy this code (SMS verification):', text);
+      });
     }
 
     function logout() {
@@ -270,6 +489,13 @@
       if (tab === 'laqun') {
         setTimeout(loadLaqunAccounts, 50);
         loadLaqun();
+      }
+      if (tab === 'acquire') {
+        setTimeout(() => {
+          loadAcquiredNumbers();
+          loadGrizzlyBalance();
+          startAcquireAutoPoll();
+        }, 80);
       }
       if (tab === 'warming') loadWarming();
       if (tab === 'contacts') loadContacts();
@@ -395,12 +621,28 @@
     }
 
     async function enterWarming(accountId) {
-      // Support mode choice (normal vs fast_warm). Defaults to normal.
-      const mode = prompt('Mode? normal (default) or fast_warm', 'normal') || 'normal';
-      const targetDays = mode === 'fast_warm' ? 5 : 10;
-      await fetch(API + '/warming/enter', { method:'POST', headers: authHeaders(), body: JSON.stringify({ws_account_id: accountId, mode, target_days: targetDays}) });
-      alert(`Entered warming pool (${mode}, ${targetDays} days) - job scheduled`);
-      loadWarming(); loadAccounts();
+      await showNotification({
+        title: 'Enter Warming Pool (养号)',
+        message: 'Choose the warming intensity. Fast warm uses more aggressive (but still safe) simulation.',
+        type: 'info',
+        inputs: [
+          { name: 'mode', label: 'Mode', type: 'select', options: [
+            { value: 'normal', label: 'Normal (standard 养号, ~10 days)' },
+            { value: 'fast_warm', label: 'Fast Warm (速养, shorter & more intense)' }
+          ] },
+          { name: 'target_days', label: 'Target Days', type: 'number', value: '10' }
+        ],
+        onConfirm: async (values) => {
+          const mode = values.mode || 'normal';
+          const targetDays = parseInt(values.target_days) || (mode === 'fast_warm' ? 5 : 10);
+          await fetch(API + '/warming/enter', {
+            method:'POST', headers: authHeaders(),
+            body: JSON.stringify({ ws_account_id: accountId, mode, target_days: targetDays })
+          });
+          showToast(`Entered warming pool (${mode}, ${targetDays} days) — job scheduled`, 'success');
+          loadWarming(); loadAccounts();
+        }
+      });
     }
 
     async function enterSelectedWarming() {
@@ -455,7 +697,11 @@
       (json.data || []).forEach(p => {
         const tr = document.createElement('tr');
         tr.innerHTML = `<td>${p.name}</td><td>${p.type}</td><td>${p.host}:${p.port}</td><td>${p.status}</td><td>${p.success_rate}</td>
-          <td><button onclick="testProxy('${p.id}')">Test</button></td>`;
+          <td>
+            <button onclick="editProxy('${p.id}', ${JSON.stringify(p).replace(/"/g, '&quot;')})">Edit</button>
+            <button onclick="deleteProxy('${p.id}')">Delete</button>
+            <button onclick="testProxy('${p.id}')">Test</button>
+          </td>`;
         tbody.appendChild(tr);
       });
     }
@@ -465,10 +711,91 @@
         name: document.getElementById('px-name').value,
         type: document.getElementById('px-type').value,
         host: document.getElementById('px-host').value,
-        port: parseInt(document.getElementById('px-port').value)
+        port: parseInt(document.getElementById('px-port').value),
+        username: document.getElementById('px-user').value || undefined,
+        password: document.getElementById('px-pass').value || undefined
       };
       await fetch(API + '/proxies', { method:'POST', headers: authHeaders(), body: JSON.stringify(body) });
       loadProxies();
+    }
+
+    async function importProxiesFromFile() {
+      const fileInput = document.getElementById('proxy-file');
+      const resultEl = document.getElementById('import-result');
+      resultEl.textContent = '';
+
+      if (!fileInput.files.length) {
+        resultEl.textContent = 'Select a .txt credential file first.';
+        return;
+      }
+
+      const file = fileInput.files[0];
+      const text = await file.text();
+
+      const defaultType = document.getElementById('import-px-type').value;
+      const namePrefix = document.getElementById('import-px-prefix').value || '';
+
+      try {
+        const res = await fetch(API + '/proxies/import', {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({ text, defaultType, namePrefix })
+        });
+        const j = await res.json();
+        const r = j.data || {};
+        resultEl.innerHTML = `<strong>${j.message || ''}</strong> Imported: ${r.imported || 0}, Skipped (dups): ${r.skipped || 0}, Errors: ${r.errors?.length || 0}`;
+        if (r.errors && r.errors.length) console.warn('Import errors:', r.errors);
+        loadProxies();
+      } catch (e) {
+        resultEl.textContent = 'Import failed: ' + (e.message || e);
+      }
+    }
+
+    async function editProxy(id, current) {
+      const result = await showNotification({
+        title: 'Edit Proxy',
+        type: 'info',
+        inputs: [
+          { name: 'name', label: 'Name', type: 'text', value: current.name || '' },
+          { name: 'type', label: 'Type', type: 'select', options: [
+            { value: 'socks5', label: 'SOCKS5' },
+            { value: 'http', label: 'HTTP' }
+          ], value: current.type },
+          { name: 'host', label: 'Host', type: 'text', value: current.host || '' },
+          { name: 'port', label: 'Port', type: 'number', value: current.port || '' },
+          { name: 'username', label: 'Username (optional)', type: 'text', value: current.username || '' },
+          { name: 'password', label: 'Password (leave blank to keep)', type: 'password', value: '' }
+        ],
+        onConfirm: async (values) => {
+          const update = {
+            name: values.name,
+            type: values.type,
+            host: values.host,
+            port: parseInt(values.port)
+          };
+          if (values.username) update.username = values.username;
+          if (values.password) update.password = values.password; // only send if provided
+
+          await fetch(API + '/proxies/' + id, {
+            method: 'PUT', headers: authHeaders(), body: JSON.stringify(update)
+          });
+          showToast('Proxy updated', 'success');
+          loadProxies();
+        }
+      });
+    }
+
+    async function deleteProxy(id) {
+      const confirmed = await showNotification({
+        title: 'Delete Proxy',
+        message: 'Are you sure you want to delete this proxy? This cannot be undone.',
+        type: 'error',
+        onConfirm: async () => {
+          await fetch(API + '/proxies/' + id, { method: 'DELETE', headers: authHeaders() });
+          showToast('Proxy deleted', 'success');
+          loadProxies();
+        }
+      });
     }
 
     async function testProxy(id) {
@@ -726,6 +1053,154 @@
       loadLaqun();
     }
 
+    // === GrizzlySMS Acquire + Transitional Numbers ===
+    async function acquireNumbers() {
+      const provider = document.getElementById('acquire-provider').value;
+      const country = document.getElementById('grizzly-country').value;
+      const count = parseInt(document.getElementById('grizzly-count').value) || 1;
+      const maxPriceEl = document.getElementById('grizzly-maxprice');
+      const maxPrice = maxPriceEl && maxPriceEl.value ? parseFloat(maxPriceEl.value) : undefined;
+
+      const body = { provider, count };
+      if (provider !== 'manual') body.country = parseInt(country);
+      if (maxPrice != null && !isNaN(maxPrice)) body.maxPrice = maxPrice;
+
+      const res = await fetch(API + '/cloud/numbers/acquire', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify(body)
+      });
+      const j = await res.json();
+      const success = (j.data || []).filter(x => x.phone).length;
+      loadGrizzlyBalance(); // refresh after attempt
+
+      if (j.balance) {
+        // Show balance info
+        console.log('Provider balance after attempt:', j.balance);
+      }
+
+      const errors = (j.data || []).filter(x => x.error);
+      if (errors.length) {
+        const balNote = j.balance ? ` (Balance: ${JSON.stringify(j.balance)})` : '';
+        alert(`Acquired ${success}. Errors: ${errors.map(e => e.error).join('; ')}${balNote}`);
+      } else {
+        alert(`${success} number(s) via ${provider}. ${j.message || ''}`);
+      }
+      loadAcquiredNumbers();
+    }
+
+    async function loadAcquiredNumbers() {
+      const res = await fetch(API + '/cloud/numbers?only_transitional=true', { headers: authHeaders() });
+      const json = await res.json();
+      const tbody = document.querySelector('#acquired-table tbody');
+      if (!tbody) return;
+      tbody.innerHTML = '';
+
+      (json.data || []).forEach(e => {
+        const prov = e.metadata?.source || e.metadata?.provider || '-';
+        const orderId = e.metadata?.order_id || e.metadata?.grizzly_order_id || '-';
+        const code = e.metadata?.last_sms_code || '';
+        const tr = document.createElement('tr');
+
+        let actions = '';
+        if (e.phone) {
+          actions += `<button onclick="provisionFromPhone('${e.phone}', ${!!(e.metadata && e.metadata.already_registered)})">Link</button> `;
+          actions += `<button onclick="pollStatus('${e.id}')">Poll Status</button> `;
+          if (e.status !== 'released') {
+            actions += `<button onclick="cancelNumber('${e.id}')">Cancel</button> `;
+          }
+          if (!(e.metadata && e.metadata.already_registered) && e.status !== 'registered') {
+            actions += `<button onclick="markRegistered('${e.id}')">Mark Registered</button>`;
+          }
+        }
+
+        tr.innerHTML = `<td>${e.phone || '(no phone)'}</td>
+          <td style="font-family:monospace;font-size:11px">${orderId}</td>
+          <td>${prov}</td>
+          <td><span class="status ${e.status}">${e.status}</span></td>
+          <td>${code ? '<span style="font-family:monospace;color:#0a0;font-weight:bold;">' + code + '</span> <button style="font-size:10px;padding:1px 4px;" onclick="copyToClipboard(\'' + code + '\')">copy</button>' : '<span style="color:#999;font-size:11px">poll to fetch</span>'}</td>
+          <td>${actions}</td>`;
+        tbody.appendChild(tr);
+      });
+
+      if ((json.data || []).length === 0) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td colspan="6"><em>No transitional numbers. Use Acquire or Manual Add above.</em></td>`;
+        tbody.appendChild(tr);
+      }
+    }
+
+    async function loadGrizzlyBalance() {
+      try {
+        const res = await fetch(API + '/cloud/numbers/balance', { headers: authHeaders() });
+        const j = await res.json();
+        const el = document.getElementById('grizzly-balance');
+        if (el) el.textContent = `Balance: ${j.data?.balance ?? j.data?.raw ?? 'N/A'}`;
+      } catch (e) {
+        console.warn('Balance fetch failed', e);
+      }
+    }
+
+    async function pollStatus(emulatorId) {
+      const res = await fetch(API + `/cloud/numbers/${emulatorId}/status`, { headers: authHeaders() });
+      const j = await res.json();
+      alert('Status: ' + JSON.stringify(j.data));
+      loadAcquiredNumbers();
+    }
+
+    async function cancelNumber(emulatorId) {
+      if (!confirm('Cancel/release this number (setStatus 8)?')) return;
+      const res = await fetch(API + `/cloud/numbers/${emulatorId}/release`, {
+        method: 'POST', headers: authHeaders()
+      });
+      const j = await res.json();
+      alert(j.message || 'Released');
+      loadAcquiredNumbers();
+    }
+
+    let acquirePollInterval = null;
+    function startAcquireAutoPoll() {
+      if (acquirePollInterval) clearInterval(acquirePollInterval);
+      acquirePollInterval = setInterval(() => {
+        const tab = document.getElementById('tab-acquire');
+        if (tab && tab.style.display !== 'none') {
+          loadAcquiredNumbers(); // light refresh; in real prod use targeted status polls
+        } else {
+          clearInterval(acquirePollInterval);
+          acquirePollInterval = null;
+        }
+      }, 15000); // poll every 15s while tab visible
+    }
+
+    async function provisionFromPhone(phone) {
+      if (!confirm(`Start Waydroid provisioning + pairing for ${phone}? (This will create a minimal account without port. Port allocated on success.)`)) return;
+
+      const res = await fetch(API + '/cloud/emulators/provision', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ phone })
+      });
+      const j = await res.json();
+
+      if (j.data && j.data.pairingCode) {
+        const area = document.getElementById('qr-area') || document.createElement('div');
+        area.innerHTML = `
+          <div class="qr" style="font-size:1.05em; white-space:pre-line;">
+            PAIRING CODE for ${phone}:\n\n
+            <strong style="font-size:1.6em; letter-spacing:4px;">${j.data.pairingCode}</strong>\n\n
+            ${j.data.instructions || ''}
+          </div>
+        `;
+        // try to surface it
+        const live = document.getElementById('live-log');
+        if (live) live.textContent = area.textContent;
+        else alert('Pairing code: ' + j.data.pairingCode + '\n\n' + (j.data.instructions || ''));
+      } else {
+        alert('Provision response: ' + JSON.stringify(j));
+      }
+      loadAcquiredNumbers();
+    }
+
     async function loadSessions() {
       const res = await fetch(API + '/sessions', { headers: authHeaders() });
       const json = await res.json();
@@ -739,7 +1214,8 @@
       tbody.innerHTML = '';
       (json.data || []).forEach(c => {
         const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${c.phone}</td><td>${c.name || ''}</td><td>${(c.tags || []).join(',')}</td><td>${c.source || ''}</td>`;
+        const tags = Array.isArray(c.tags) ? c.tags : (c.tags ? (typeof c.tags === 'string' ? JSON.parse(c.tags) : []) : []);
+        tr.innerHTML = `<td>${c.phone}</td><td>${c.name || ''}</td><td>${tags.join(',')}</td><td>${c.source || ''}</td>`;
         tbody.appendChild(tr);
       });
     }

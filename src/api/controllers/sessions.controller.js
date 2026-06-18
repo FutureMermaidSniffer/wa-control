@@ -36,22 +36,33 @@ export async function connectNumber(req, res, next) {
 
     // Create or find the account record
     let account = await db('ws_accounts').where({ phone }).first();
+    const isPairingCodeFlow = usePairingCode || acquisitionMethod === 'phone_assoc';
+
     if (!account) {
+      const insertData = {
+        phone,
+        acquisition_method: acquisitionMethod,
+        status: isPairingCodeFlow ? 'pending_verification' : 'pending_login',
+      };
+
+      // For normal flows, allow explicit port assignment.
+      // For phone_assoc / cloud / pairing code flows we deliberately defer port allocation
+      // until successful connection (see SessionManager 'open' handler + user request).
+      if (!isPairingCodeFlow) {
+        insertData.port_id = portId || null;
+        insertData.proxy_id = proxyId || null;
+      }
+
       const [created] = await db('ws_accounts')
-        .insert({
-          phone,
-          port_id: portId || null,
-          proxy_id: proxyId || null,
-          acquisition_method: acquisitionMethod,
-          status: 'pending_login',
-        })
+        .insert(insertData)
         .returning('*');
       account = created;
-      if (portId) {
+
+      if (!isPairingCodeFlow && portId) {
         await portsData.incrementAssigned(portId, 1);
       }
-    } else if (portId && account.port_id !== portId) {
-      // reassign port
+    } else if (portId && account.port_id !== portId && !isPairingCodeFlow) {
+      // reassign port only for non-cloud flows
       if (account.port_id) await portsData.decrementAssigned(account.port_id, 1);
       await db('ws_accounts').where({ id: account.id }).update({ port_id: portId });
       await portsData.incrementAssigned(portId, 1);

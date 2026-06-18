@@ -26,24 +26,43 @@ const sessionManager = new SessionManager(db);
 export class EmulatorService {
   constructor() {
     this.provider = 'waydroid';
+    // How many Waydroid/Android instances we allow to be starting/running at the same time.
+    // For 50 active numbers you do NOT need 50 emulators.
+    // Emulators are only needed during initial WhatsApp registration + Baileys pairing.
+    // Once linked, the Baileys session runs headless in Node (no emulator required).
+    // Typical: 2-6 concurrent slots depending on your VPS/hardware.
+    this.maxConcurrent = parseInt(process.env.MAX_CONCURRENT_EMULATORS || '4', 10);
+    this.currentConcurrent = 0;
   }
 
   /**
-   * Create a new emulator record for a ws_account.
-   * Call this before provisioning.
+   * Create a new emulator record.
+   * Supports two modes for transitional "phone-first" acquisition:
+   *  - With wsAccountId (legacy / when account already exists)
+   *  - With phone only (new: number acquired from GrizzlySMS etc., full ws_account + port allocated only on successful link)
    */
-  async createEmulatorRecord(wsAccountId, host = 'localhost', metadata = {}) {
+  async createEmulatorRecord({ wsAccountId = null, phone = null, host = 'localhost', metadata = {} } = {}) {
+    if (!wsAccountId && !phone) {
+      throw new Error('createEmulatorRecord requires either wsAccountId or phone');
+    }
+
+    const insertData = {
+      ws_account_id: wsAccountId,
+      phone,
+      provider: this.provider,
+      host,
+      status: 'provisioning',
+      metadata: {
+        ...metadata,
+        ...(phone && { phone_source: metadata.phone_source || 'manual_or_grizzly' }),
+      },
+    };
+
     const [emulator] = await db('cloud_emulators')
-      .insert({
-        ws_account_id: wsAccountId,
-        provider: this.provider,
-        host,
-        status: 'provisioning',
-        metadata,
-      })
+      .insert(insertData)
       .returning('*');
 
-    logger.info('Created cloud emulator record', { emulatorId: emulator.id, wsAccountId });
+    logger.info('Created cloud emulator record', { emulatorId: emulator.id, wsAccountId, phone });
     return emulator;
   }
 
@@ -87,7 +106,11 @@ export class EmulatorService {
 
     await this.updateEmulator(emulatorId, { status: 'starting' });
 
-    // Use xvfb-run for headless operation by default.
+    if (this.currentConcurrent >= this.maxConcurrent) {
+      throw new Error(`Too many concurrent emulators (max ${this.maxConcurrent}). Queue or wait. For 50 numbers you only need a small pool for onboarding/recovery.`);
+    }
+    this.currentConcurrent++;
+
     // This provides a virtual X11 display so Waydroid doesn't require a real Wayland/X compositor.
     const cmd = options.useXvfb !== false
       ? 'xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" waydroid session start'
@@ -127,6 +150,8 @@ export class EmulatorService {
       await this.updateEmulator(emulatorId, { status: 'error' });
       logger.error('Failed to start Waydroid session', { emulatorId, error: err.message, stderr: err.stderr });
       throw err;
+    } finally {
+      this.currentConcurrent = Math.max(0, this.currentConcurrent - 1);
     }
   }
 
@@ -144,10 +169,12 @@ export class EmulatorService {
         metadata: { ...emulator.metadata, stopped_at: new Date().toISOString() },
       });
       logger.info('Waydroid session stopped', { emulatorId });
+      this.currentConcurrent = Math.max(0, this.currentConcurrent - 1);
       return { success: true };
     } catch (err) {
       logger.warn('Error stopping Waydroid (may already be stopped)', { emulatorId, error: err.message });
       await this.updateEmulator(emulatorId, { status: 'stopped' });
+      this.currentConcurrent = Math.max(0, this.currentConcurrent - 1);
       return { success: false, error: err.message };
     }
   }
@@ -181,20 +208,48 @@ export class EmulatorService {
 
   /**
    * Trigger the phone-less linking flow.
-   * This starts the Baileys socket for the account and returns a pairing code
-   * that you (or automation) will enter inside the WhatsApp app in the emulator.
+   * Supports transitional phone-first: if no ws_account yet (common for newly acquired Grizzly numbers),
+   * we create a minimal ws_account (status 'pending_verification', no port allocated yet).
+   * Full profile + port allocation happens on successful Baileys connection 'open'.
    */
   async linkWithPairingCode(emulatorId) {
     const emulator = await this.getEmulator(emulatorId);
     if (!emulator) throw new Error('Emulator not found');
 
-    const account = await db('ws_accounts').where({ id: emulator.ws_account_id }).first();
-    if (!account) throw new Error('Associated ws_account not found');
+    let account = null;
+
+    if (emulator.ws_account_id) {
+      account = await db('ws_accounts').where({ id: emulator.ws_account_id }).first();
+    } else if (emulator.phone) {
+      // Transitional phone-first path: create minimal account so we can request pairing code
+      // and store baileys_auth_state. No port is allocated here.
+      account = await db('ws_accounts').where({ phone: emulator.phone }).first();
+
+      if (!account) {
+        const [created] = await db('ws_accounts')
+          .insert({
+            phone: emulator.phone,
+            status: 'pending_verification',
+            acquisition_method: 'phone_assoc',
+            // deliberately no port_id / proxy_id here
+          })
+          .returning('*');
+        account = created;
+
+        // Link the emulator record to the newly created (minimal) account
+        await this.updateEmulator(emulatorId, { ws_account_id: account.id });
+        logger.info('Created minimal ws_account for transitional phone-first flow (no port yet)', {
+          phone: emulator.phone,
+          accountId: account.id,
+        });
+      }
+    }
+
+    if (!account) throw new Error('Could not resolve or create ws_account for linking');
 
     await this.updateEmulator(emulatorId, { status: 'linking' });
 
     try {
-      // This uses the new pairing code support we added for cloud flows
       const code = await sessionManager.requestPairingCode(account.id, account.phone);
 
       await this.updateEmulator(emulatorId, {
@@ -212,7 +267,8 @@ export class EmulatorService {
       return {
         success: true,
         pairingCode: code,
-        instructions: 'Enter this code in the WhatsApp app running inside the Waydroid session. Once linked you can stop the session.',
+        instructions: 'Enter this code in the WhatsApp app running inside the Waydroid session. Once linked you can stop the session. Port will be allocated on successful connection.',
+        accountId: account.id,
       };
     } catch (err) {
       await this.updateEmulator(emulatorId, { status: 'error' });
@@ -222,16 +278,51 @@ export class EmulatorService {
 
   /**
    * Full convenience flow (high level).
-   * In production you would break this into steps with UI/automation hooks.
+   * Supports phone-first transitional + manual registration flows.
+   *
+   * If options.linkOnly === true (or metadata.alreadyRegistered), we SKIP
+   * starting the emulator and installing WhatsApp. This is for the case where
+   * the user ran their own emulator launcher with `--account <phone>` (or equivalent),
+   * received the WhatsApp SMS code from the provider, and already completed
+   * registration inside WhatsApp.
+   *
+   * In that case we go straight to creating the minimal account (if needed) and
+   * requesting the Baileys pairing code.
    */
-  async provisionAndLink(wsAccountId, options = {}) {
-    const emulator = await this.createEmulatorRecord(wsAccountId, options.host, options.metadata);
+  async provisionAndLink(identifier, options = {}) {
+    const createOpts = {};
+    if (typeof identifier === 'string') {
+      createOpts.wsAccountId = identifier;
+    } else if (identifier && typeof identifier === 'object') {
+      createOpts.wsAccountId = identifier.wsAccountId;
+      createOpts.phone = identifier.phone;
+    }
+    if (options.phone && !createOpts.phone) createOpts.phone = options.phone;
 
-    await this.startWaydroidSession(emulator.id, options);
-    await this.installWhatsApp(emulator.id, options.apkPath);
+    const emulator = await this.createEmulatorRecord({
+      ...createOpts,
+      host: options.host,
+      metadata: options.metadata,
+    });
 
-    // At this point the user (or script) should have registered the number inside the emulator
-    // using a virtual SMS provider.
+    const isLinkOnly = options.linkOnly === true ||
+                       options.assumeRegistered === true ||
+                       emulator.metadata?.already_registered === true;
+
+    if (!isLinkOnly) {
+      await this.startWaydroidSession(emulator.id, options);
+      await this.installWhatsApp(emulator.id, options.apkPath);
+      // User must now complete WhatsApp registration using the SMS code from their provider.
+    } else {
+      await this.updateEmulator(emulator.id, {
+        status: 'registered',
+        metadata: {
+          ...emulator.metadata,
+          link_only: true,
+          note: 'Emulator start/install skipped — registration assumed complete by operator (manual or external --account flow)',
+        },
+      });
+    }
 
     const linkResult = await this.linkWithPairingCode(emulator.id);
 

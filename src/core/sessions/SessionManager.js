@@ -25,6 +25,7 @@ import makeWASocket, {
   fetchLatestBaileysVersion,
   Browsers,
 } from '@whiskeysockets/baileys';
+import portsData from '../../data/ports.data.js';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { EventEmitter } from 'events';
@@ -104,9 +105,50 @@ export class SessionManager extends EventEmitter {
 
       if (connection === 'open') {
         logger.info(`Session OPEN for ${account.phone} (${account.id})`);
+
+        const wasPending = account.status === 'pending_verification' || account.status === 'pending_login';
+        const isPhoneAssoc = account.acquisition_method === 'phone_assoc';
+
+        const updatePatch = {
+          status: 'active',
+          last_linked_at: this.db.fn.now(),
+          last_seen_at: this.db.fn.now(),
+        };
+
+        // Port allocation on success only (user request for transitional phone-first flows)
+        // If this was a cloud / SMS-acquired number that was created without a port,
+        // allocate one now (first available normal port with capacity).
+        if ((wasPending || isPhoneAssoc) && !account.port_id) {
+          try {
+            // Find a port with remaining capacity
+            const availablePort = await this.db('ports')
+              .where({ status: 'active', type: 'normal' })
+              .whereRaw('numbers_assigned < max_numbers')
+              .orderBy('created_at')
+              .first();
+
+            if (availablePort) {
+              updatePatch.port_id = availablePort.id;
+              await portsData.incrementAssigned(availablePort.id, 1);
+              logger.info('Allocated port on successful link (deferred from creation)', {
+                accountId: account.id,
+                phone: account.phone,
+                portId: availablePort.id,
+              });
+            } else {
+              logger.warn('No available port to allocate on link success for phone_assoc number', {
+                accountId: account.id,
+                phone: account.phone,
+              });
+            }
+          } catch (e) {
+            logger.error('Failed to auto-allocate port on link success', { error: e.message });
+          }
+        }
+
         await this.db('ws_accounts')
           .where({ id: account.id })
-          .update({ status: 'active', last_linked_at: this.db.fn.now(), last_seen_at: this.db.fn.now() });
+          .update(updatePatch);
 
         this.emit('connected', { accountId: account.id, phone: account.phone });
         this.reconnectDelays.delete(account.id);
