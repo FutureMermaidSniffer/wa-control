@@ -77,7 +77,7 @@ export async function createFanBlast(req, res, next) {
 }
 
 /**
- * Cold blast (爆粉群发): targets are "stranger" / cold phones supplied explicitly (or from a dedicated pool later).
+ * Cold blast: targets are "stranger" / cold phones supplied explicitly (or from a dedicated pool later).
  * No contact opt-in/DND filtering by default (still subject to global/per-number caps in worker).
  * target_phones: array of phone strings.
  */

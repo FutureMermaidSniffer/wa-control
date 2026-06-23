@@ -44,7 +44,7 @@ export async function seed(knex) {
   const existingPool = await knex('warming_pools').first();
   if (!existingPool) {
     await knex('warming_pools').insert({
-      name: 'Default 养号池',
+      name: 'Default Warming Pool',
       mode: 'normal',
       target_days: 10,
       description: 'Standard warming pool per PDF',
@@ -56,9 +56,9 @@ export async function seed(knex) {
   const matCount = await knex('materials').count('* as c').first();
   if (parseInt(matCount.c) === 0) {
     await knex('materials').insert([
-      { type: 'nickname', name: 'WarmNick1', content: '小明在线' },
-      { type: 'nickname', name: 'WarmNick2', content: '客服小李' },
-      { type: 'message', name: 'Hello', content: '你好，有什么可以帮你的吗？' },
+      { type: 'nickname', name: 'WarmNick1', content: 'Alex Online' },
+      { type: 'nickname', name: 'WarmNick2', content: 'Support Sam' },
+      { type: 'message', name: 'Hello', content: 'Hello, how can I help you?' },
       { type: 'avatar', name: 'SampleAvatar', content: 'sample-avatar.jpg' }, // placeholder; real upload path would be used
     ]);
     console.log('Seeded sample materials');

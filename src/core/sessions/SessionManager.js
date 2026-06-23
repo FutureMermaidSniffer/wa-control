@@ -7,7 +7,7 @@
  * - Per-session proxy injection (HTTP or SOCKS5) for geo distribution.
  * - QR code / pairing code login flows.
  * - Connection lifecycle, auto-reconnect with backoff.
- * - Expose high-level actions used by warming, blasts, 拉群, desk chat: send, profile update, group ops, presence.
+ * - Expose high-level actions used by warming, blasts, group pulls, desk chat: send, profile update, group ops, presence.
  * - Emit events for realtime desk (via Socket.io) and internal jobs.
  *
  * This is the heart of the system. Everything else (ports, warming, CS desk, etc.) builds on live sessions from here.
@@ -24,8 +24,12 @@ import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
   Browsers,
+  initAuthCreds,
+  BufferJSON,
+  makeCacheableSignalKeyStore,
 } from '@whiskeysockets/baileys';
 import portsData from '../../data/ports.data.js';
+import https from 'https';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { EventEmitter } from 'events';
@@ -39,14 +43,28 @@ import pino from 'pino';
 // Dedicated quiet logger for Baileys (prevents [object Object] spam and level noise)
 const baileysLogger = pino({ level: process.env.BAILEYS_LOG_LEVEL || 'warn' });
 
+// Broken IPv6 routes cause ETIMEDOUT to web.whatsapp.com; force IPv4 by default.
+const socketFamily = process.env.WA_SOCKET_FAMILY
+  ? parseInt(process.env.WA_SOCKET_FAMILY, 10)
+  : 4;
+
 // In-memory registry of active sockets by wsAccountId (string uuid)
 const activeSockets = new Map(); // wsAccountId -> { sock, account, proxy }
+
+/** Pairing codes expire quickly; reuse the same code within this window. */
+const PAIRING_CODE_TTL_MS = 120_000;
+/** Rapid reconnects on WA "Connection Failure" (405) invalidate the phone-side code. */
+const PAIRING_FAILURE_RECONNECT_MS = 10_000;
 
 export class SessionManager extends EventEmitter {
   constructor(db) {
     super();
     this.db = db;
     this.reconnectDelays = new Map(); // simple backoff per account
+    /** @type {Map<string, { phone: string, code: string, startedAt: number, reconnectAttempts?: number }>} */
+    this.pairingInProgress = new Map();
+    /** @type {Map<string, { resolve: Function, reject: Function, timeout: NodeJS.Timeout }>} */
+    this._pairingReadyWaiters = new Map();
   }
 
   /**
@@ -57,7 +75,9 @@ export class SessionManager extends EventEmitter {
   async getOrCreateSocket(accountId) {
     if (activeSockets.has(accountId)) {
       const entry = activeSockets.get(accountId);
-      if (entry.sock?.user) return entry.sock; // already connected
+      // sock.user (creds.me) is set during pairing before link completes — only reuse live sockets.
+      if (entry.sock?.ws?.isOpen) return entry.sock;
+      activeSockets.delete(accountId);
     }
 
     const account = await this.db('ws_accounts')
@@ -87,8 +107,11 @@ export class SessionManager extends EventEmitter {
       printQRInTerminal: false, // we surface QR via events / API
       browser: Browsers.ubuntu('Chrome'),
       logger: baileysLogger.child({ account: account.phone }),
-      // Proxy injection — this is key for your "clients in different areas"
-      ...(proxyRow ? this._buildProxyConfig(proxyRow) : {}),
+      connectTimeoutMs: 60_000,
+      defaultQueryTimeoutMs: 60_000,
+      markOnlineOnConnect: false,
+      // Proxy injection + IPv4 fallback for WA websocket (many VPS/Kali setups have broken IPv6)
+      ...this._buildNetworkAgents(proxyRow),
     };
 
     const sock = makeWASocket(socketConfig);
@@ -98,10 +121,12 @@ export class SessionManager extends EventEmitter {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
-        // Surface QR for frontend (主管台 scan login)
+        // Surface QR for frontend (supervisor desk scan login)
         this.emit('qr', { accountId: account.id, phone: account.phone, qr });
         logger.info(`QR generated for ${account.phone}`);
       }
+
+      this._resolvePairingReady(account.id, update);
 
       if (connection === 'open') {
         logger.info(`Session OPEN for ${account.phone} (${account.id})`);
@@ -150,6 +175,7 @@ export class SessionManager extends EventEmitter {
           .where({ id: account.id })
           .update(updatePatch);
 
+        this.pairingInProgress.delete(account.id);
         this.emit('connected', { accountId: account.id, phone: account.phone });
         this.reconnectDelays.delete(account.id);
       }
@@ -157,19 +183,58 @@ export class SessionManager extends EventEmitter {
       if (connection === 'close') {
         const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
         const reason = lastDisconnect?.error?.message || 'unknown';
+        const awaitingPairing = this.pairingInProgress.has(account.id);
 
-        logger.warn(`Session CLOSED for ${account.phone}: ${reason} (reconnect=${shouldReconnect})`);
+        if (awaitingPairing) {
+          logger.info(
+            `Pairing wait for ${account.phone}: ${reason} — enter the 8-digit code on the primary WhatsApp (Linked devices → Link a device). Retrying until linked or timeout.`
+          );
+        } else {
+          logger.warn(`Session CLOSED for ${account.phone}: ${reason} (reconnect=${shouldReconnect})`);
+        }
 
-        await this.db('ws_accounts')
-          .where({ id: account.id })
-          .update({ status: shouldReconnect ? 'offline' : 'error' });
+        if (!awaitingPairing) {
+          await this.db('ws_accounts')
+            .where({ id: account.id })
+            .update({ status: shouldReconnect ? 'offline' : 'error' });
+        }
 
         this.emit('disconnected', { accountId: account.id, phone: account.phone, reason, shouldReconnect });
 
         activeSockets.delete(account.id);
 
         if (shouldReconnect) {
-          const delay = this._getBackoff(account.id);
+          let delay = this._getBackoff(account.id);
+
+          if (awaitingPairing) {
+            const statusCode = lastDisconnect?.error?.output?.statusCode;
+            const pinfo = this.pairingInProgress.get(account.id);
+
+            if (pinfo) {
+              pinfo.reconnectAttempts = (pinfo.reconnectAttempts || 0) + 1;
+              if (pinfo.reconnectAttempts > 12) {
+                this.pairingInProgress.delete(account.id);
+                logger.error(
+                  `Pairing abandoned for ${account.phone} after ${pinfo.reconnectAttempts} reconnects. ` +
+                  'The code is likely invalid — wait 15 min, then request a fresh code (or use QR login).'
+                );
+                return;
+              }
+            }
+
+            // Baileys wiki: WA forcibly disconnects after companion_hello — restartRequired is normal.
+            if (statusCode === DisconnectReason.restartRequired) {
+              delay = 500;
+            } else if (reason.includes('Connection Terminated')) {
+              delay = 1500;
+            } else if (reason.includes('Connection Failure')) {
+              // Rapid 405 retries invalidate the code on the phone — back off aggressively.
+              delay = PAIRING_FAILURE_RECONNECT_MS;
+            } else {
+              delay = 4000;
+            }
+          }
+
           setTimeout(() => {
             this.getOrCreateSocket(account.id).catch((e) =>
               logger.error(`Reconnect failed for ${account.phone}`, e)
@@ -188,9 +253,16 @@ export class SessionManager extends EventEmitter {
       }
     });
 
-    // You can add more: groups.update, presence.update, etc. as needed by 拉群 / desk / warming
+    // You can add more: groups.update, presence.update, etc. as needed by group pulls / desk / warming
 
     return sock;
+  }
+
+  _buildNetworkAgents(proxyRow) {
+    if (proxyRow) return this._buildProxyConfig(proxyRow);
+
+    const agent = new https.Agent({ family: socketFamily, keepAlive: true });
+    return { agent, fetchAgent: agent };
   }
 
   _buildProxyConfig(proxyRow) {
@@ -209,7 +281,7 @@ export class SessionManager extends EventEmitter {
       }
     } catch (e) {
       logger.error('Failed to create proxy agent', { proxyId: proxyRow.id, error: e.message });
-      return {};
+      return this._buildNetworkAgents(null);
     }
   }
 
@@ -229,17 +301,17 @@ export class SessionManager extends EventEmitter {
       if (raw && raw.encrypted) {
         // Our encrypted format: { encrypted: true, data: "base64..." }
         const decrypted = decrypt(raw.data);
-        return decrypted ? JSON.parse(decrypted) : undefined;
+        return decrypted ? JSON.parse(decrypted, BufferJSON.reviver) : undefined;
       }
       return raw; // legacy plain (migrate on save)
     };
 
     const initial = (await loadState()) || {};
 
-    // Use a lightweight in-memory + save-to-DB wrapper
-    // (inspired by Baileys useMultiFileAuthState but DB + encryption)
+    // Baileys requires full crypto material (noiseKey, signedIdentityKey, etc.).
+    // Empty {} creds cause requestPairingCode to crash on noiseKey.public.
     const state = {
-      creds: initial.creds || {},
+      creds: initial.creds?.noiseKey ? initial.creds : initAuthCreds(),
       keys: initial.keys || {},
     };
 
@@ -254,29 +326,31 @@ export class SessionManager extends EventEmitter {
       await this._persistAuthState(account.id, state);
     };
 
+    const keyStore = {
+      get: async (type, ids) => {
+        const key = state.keys[type];
+        if (!key) return undefined;
+        return ids ? ids.map((id) => key[id]) : key;
+      },
+      set: async (data) => {
+        for (const type in data) {
+          state.keys[type] = { ...(state.keys[type] || {}), ...data[type] };
+        }
+        await saveKeys(state.keys);
+      },
+    };
+
     // Provide a full AuthenticationState shape that Baileys expects
     const fullState = {
       creds: state.creds,
-      keys: {
-        get: (type, ids) => {
-          const key = state.keys[type];
-          if (!key) return undefined;
-          return ids ? ids.map((id) => key[id]) : key;
-        },
-        set: async (data) => {
-          for (const type in data) {
-            state.keys[type] = { ...(state.keys[type] || {}), ...data[type] };
-          }
-          await saveKeys(state.keys);
-        },
-      },
+      keys: makeCacheableSignalKeyStore(keyStore, baileysLogger.child({ account: account.phone })),
     };
 
     return { state: fullState, saveCreds };
   }
 
   async _persistAuthState(accountId, stateObj) {
-    const json = JSON.stringify(stateObj);
+    const json = JSON.stringify(stateObj, BufferJSON.replacer);
     const encrypted = encrypt(json);
     const payload = { encrypted: true, data: encrypted };
 
@@ -286,6 +360,63 @@ export class SessionManager extends EventEmitter {
         baileys_auth_state: payload,
         updated_at: this.db.fn.now(),
       });
+  }
+
+  _resolvePairingReady(accountId, update) {
+    const waiter = this._pairingReadyWaiters.get(accountId);
+    if (!waiter) return;
+
+    if (update.qr || update.connection === 'connecting') {
+      clearTimeout(waiter.timeout);
+      this._pairingReadyWaiters.delete(accountId);
+      waiter.resolve();
+      return;
+    }
+
+    if (update.connection === 'close') {
+      const code = update.lastDisconnect?.error?.output?.statusCode;
+      if (code === DisconnectReason.loggedOut) {
+        clearTimeout(waiter.timeout);
+        this._pairingReadyWaiters.delete(accountId);
+        waiter.reject(new Error('Logged out before pairing could start'));
+      }
+    }
+  }
+
+  /**
+   * Baileys docs: wait for the QR/connecting phase before requestPairingCode.
+   * Must be registered BEFORE the socket is created to avoid missing the event.
+   */
+  _armPairingReadyWait(accountId, timeoutMs = 60_000) {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this._pairingReadyWaiters.delete(accountId);
+        reject(new Error(
+          'Timed out waiting for Baileys pairing phase. WhatsApp may be rate-limiting this number — wait 15 minutes or use QR login.'
+        ));
+      }, timeoutMs);
+
+      this._pairingReadyWaiters.set(accountId, { resolve, reject, timeout });
+    });
+  }
+
+  /** Clear partial pairing creds so a fresh code can be requested. */
+  async _resetPairingAuth(accountId) {
+    const entry = activeSockets.get(accountId);
+    if (entry?.sock) {
+      try { entry.sock.end(); } catch {}
+    }
+    activeSockets.delete(accountId);
+    this.pairingInProgress.delete(accountId);
+    const waiter = this._pairingReadyWaiters.get(accountId);
+    if (waiter) {
+      clearTimeout(waiter.timeout);
+      this._pairingReadyWaiters.delete(accountId);
+    }
+
+    await this.db('ws_accounts')
+      .where({ id: accountId })
+      .update({ baileys_auth_state: null, status: 'pending_verification' });
   }
 
   _getBackoff(accountId) {
@@ -315,21 +446,49 @@ export class SessionManager extends EventEmitter {
    * 4. Enter the code in the WhatsApp app inside the emulator.
    * 5. Linking completes → auth state saved in DB → you can shut down the emulator.
    */
-  async requestPairingCode(accountId, phoneNumber) {
-    const sock = await this.getOrCreateSocket(accountId);
-
-    // Ensure we are in a pre-link state (no existing creds)
-    if (sock.user) {
-      throw new Error('Account is already linked. Disconnect first if you want to re-link.');
+  async requestPairingCode(accountId, phoneNumber, { forceNew = false } = {}) {
+    const existing = this.pairingInProgress.get(accountId);
+    if (!forceNew && existing && Date.now() - existing.startedAt < PAIRING_CODE_TTL_MS) {
+      logger.info(`Reusing in-flight pairing code for ${phoneNumber}: ${existing.code}`);
+      return existing.code;
     }
 
-    // Baileys will emit 'connection.update' with the code in some versions,
-    // but requestPairingCode returns the code directly in recent Baileys.
+    const account = await this.db('ws_accounts').where({ id: accountId }).first();
+    if (account?.baileys_auth_state) {
+      const { state } = await this._getAuthState(account);
+      if (state.creds?.registered) {
+        throw new Error('Account is already linked. Disconnect first if you want to re-link.');
+      }
+      // Partial pairing creds (me/pairingCode without registered) break reconnect — start clean.
+      if (forceNew || state.creds?.pairingCode || state.creds?.me) {
+        await this._resetPairingAuth(accountId);
+      }
+    } else if (forceNew) {
+      await this._resetPairingAuth(accountId);
+    }
+
+    // Official Baileys flow: arm waiter first, then create socket, wait for QR/connecting, then request code.
+    const pairingReady = this._armPairingReadyWait(accountId);
+    const sock = await this.getOrCreateSocket(accountId);
+    await pairingReady;
+    await sock.waitForSocketOpen();
+
     const code = await sock.requestPairingCode(phoneNumber.replace(/[^0-9]/g, ''));
+
+    this.pairingInProgress.set(accountId, {
+      phone: phoneNumber,
+      code,
+      startedAt: Date.now(),
+      reconnectAttempts: 0,
+    });
 
     this.emit('pairing_code', { accountId, phone: phoneNumber, code });
 
-    logger.info(`Pairing code requested for ${phoneNumber}: ${code}`);
+    logger.info(`Pairing code for ${phoneNumber}: ${code}`);
+    logger.info(
+      `Enter ${code} on the primary WhatsApp within ~60s: Linked devices → Link a device. ` +
+      'Do NOT re-run the script (that invalidates the code). Leave this process running.'
+    );
 
     return code;
   }

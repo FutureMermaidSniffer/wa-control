@@ -1,6 +1,6 @@
 /**
- * Blast worker - processes 群发 campaigns.
- * Supports 粉丝群发 (fan) and basic 爆粉群发 (cold) with safety.
+ * Blast worker - processes mass-messaging campaigns.
+ * Supports fan blasts and basic cold blasts with safety.
  */
 import { Worker } from 'bullmq';
 import { getConnection } from '../queues.js';

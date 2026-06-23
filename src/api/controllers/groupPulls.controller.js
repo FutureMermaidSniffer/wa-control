@@ -6,7 +6,7 @@ import { logger } from '../../utils/logger.js';
 import db from '../../db/connection.js';
 
 /**
- * Group Pulls (拉群) controller — TASKS.md 7.1
+ * Group Pulls controller — TASKS.md 7.1
  * Uses privileged "admin" WS numbers (scanned/owned with rights) to create groups + add members.
  */
 

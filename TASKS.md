@@ -1,11 +1,11 @@
 # WA Control — Comprehensive Sequential Implementation Tasks (Agent-Assignable)
 
 **Project**: wa-control (completely independent from previous whatsapp-saas)
-**Objective**: Ship a holistic raw-control WhatsApp system that replicates (and can exceed) the functionality and operational feel of the 火箭WS云控 PDF manual, adapted for your constraints:
+**Objective**: Ship a holistic raw-control WhatsApp system that replicates (and can exceed) the functionality and operational feel of the Rocket WS Cloud Control PDF manual, adapted for your constraints:
 - Legal / owned numbers & contacts only in real use.
 - Full proxy support per port/number (geo for different clients/areas).
-- Full number warming (养号) system for **your own numbers only** (no hijacked numbers enter warming).
-- Implement **every** core feature from the PDF (including cold blast, "hijack" login flows, port purchase, fan inheritance, 拉群 with privileged adds, etc.) for completeness and future flexibility. In your daily operation, simply don't use the cold paths and label/flag all numbers as "org-owned".
+- Full number warming system for **your own numbers only** (no hijacked numbers enter warming).
+- Implement **every** core feature from the PDF (including cold blast, "hijack" login flows, port purchase, fan inheritance, group pull with privileged adds, etc.) for completeness and future flexibility. In your daily operation, simply don't use the cold paths and label/flag all numbers as "org-owned".
 
 **"Raw control" definition**: Full linked-device session control (Baileys) — QR/pairing login, live presence, free profile (avatar/nick) mutation, group admin actions, behavioral simulation for warming, per-number proxying, etc. This is **not** the high-level official Cloud API system.
 
@@ -101,7 +101,7 @@
   - diversion_links (id, short_code or path, target_ws_account_id, name, stats: leads_captured, ...)
   - blast_campaigns (type: 'fan'|'cold', target_type, status, stats, created_by, ...)
   - blast_recipients
-  - group_pulls (拉群 tasks)
+  - group_pulls (group pull tasks)
   - conversations / messages (for desk history + inheritance)
   - agent_stats, exports, audit everywhere.
   - webhook_logs or event_logs if needed.
@@ -133,7 +133,7 @@
   - Profile updates (updateProfileName, updateProfilePicture from materials).
   - Group actions (create group, add participants, get invite code, leave, etc.).
   - Send helpers with delays (randomized 1-8s etc. to look human).
-- Support "扫码登录", "电话号码关联登录" exactly.
+- Support QR scan login and phone number association login exactly.
 - Acceptance: Can create a session, display QR (via API + event), scan with real phone (or test number), it goes "online", can send/receive a message, reconnect after kill, proxy is applied (verify via logs or external IP check if possible), auth state survives restart.
 - Warning: This task will iterate. Plan 3-5 iterations with real device testing.
 - Agent: **backend-engine specialist** (must know or learn Baileys deeply). Est: 5-8d (biggest single task)
@@ -170,14 +170,14 @@
 **3.1** Port purchase / allocation system (full PDF port records)
 - Prereqs: 1.1, 2.1
 - Endpoints + services: "purchase" port (internal: create record with type, dates, notes), list ports with usage (how many numbers assigned, remaining capacity), expiry warnings, assign port to number or free it.
-- Types: normal (default 10d warm), fast_warm (速养, "1500 ports" special? — implement as flag that allows faster/more aggressive warming schedule).
+- Types: normal (default 10d warm), fast_warm (fast warm, "1500 ports" special? — implement as flag that allows faster/more aggressive warming schedule).
 - Warehouse ports are "independent".
 - Acceptance: Can purchase 10 normal ports, see in list with 0 used, assign to a WS number, used count increases, expiry query works.
 - Agent: backend. Est: 1.5d
 
 **3.2** WS Number (account) CRUD, groups, batch ops, import (6-segment or CSV)
 - Prereqs: 3.1, 2.3
-- Import: support the "常规六段号" style or flexible CSV (phone, label, initial proxy?, group?).
+- Import: support the standard six-segment number format or flexible CSV (phone, label, initial proxy?, group?).
 - Groups: create, assign numbers, batch move.
 - Batch: login selected, set offline, apply avatar/nick from materials (random or specific), update label.
 - One-key ops.
@@ -202,12 +202,12 @@
 
 ---
 
-## Phase 4: Warming System (养号池 + 任务) — Your Explicit Requirement
+## Phase 4: Warming System (Warming Pool + Tasks) — Your Explicit Requirement
 
 **4.1** Warming pool & task model + CRUD
 - Prereqs: 1.1, 3.2 (numbers can be offline)
-- UI/API: Move offline number into 养号池 (must be offline).
-- Create 养号任务: mode (default 10 days, 速养 fast), schedule, intensity, assigned port/proxy if needed.
+- UI/API: Move offline number into warming pool (must be offline).
+- Create warming task: mode (default 10 days, fast warm), schedule, intensity, assigned port/proxy if needed.
 - Searchable list of warming numbers/tasks (PDF p16).
 - Acceptance: Number enters pool, task created, status "pending" → "executing".
 - Agent: backend. Est: 1d
@@ -222,7 +222,7 @@
   - Simulate light receiving (if test convos exist).
   - Join/leave a "warm group" slowly.
   - Vary timing, volume per day (ramp up).
-- Different schedules for normal vs 速养.
+- Different schedules for normal vs fast warm.
 - Track progress (day 3/10), health during warm.
 - Safety: Never aggressive, randomized, respect per-number daily caps, auto-pause on errors.
 - "Only our own numbers" — enforced by acquisition flags + no special hijack during warm.
@@ -240,17 +240,17 @@
 
 ## Phase 5: Contacts, Tags, Data Pool, Diversion Links
 
-**5.1** Contacts / 粉丝 full (search, tags/labels, groups, notes, import/export)
+**5.1** Contacts / fans full (search, tags/labels, groups, notes, import/export)
 - Prereqs: 1.1, 1.2
-- Matches PDF p17: search, 标签列表 (multi-tag per contact), assign tags in list.
-- CSV import for data pool (联系人数据池 p18).
+- Matches PDF p17: search, tag list (multi-tag per contact), assign tags in list.
+- CSV import for data pool (contact data pool p18).
 - Export unused.
 - Opt-in / DND / type (lead vs existing fan).
 - "Pull to CS desk" integration later.
 - Acceptance: All PDF fan list + label + data pool flows. Assigned tags visible.
 - Agent: backend. Est: 2d
 
-**5.2** Diversion / 分流链接 + per-WS attribution stats
+**5.2** Diversion / diversion links + per-WS attribution stats
 - Prereqs: 5.1, 3.2
 - Create link (short code or /join/xxx). Visitor "registers" or sends a message? (or form that creates contact attributed to the WS number).
 - Or: unique invite links that when used create a contact + optionally start a convo on that number.
@@ -260,9 +260,9 @@
 
 ---
 
-## Phase 6: Materials Library + Blasting (群发)
+## Phase 6: Materials Library + Blasting
 
-**6.1** Materials (素材库): avatars, nicks, messages (p28-29, p52)
+**6.1** Materials library: avatars, nicks, messages (p28-29, p52)
 - Prereqs: 1.1
 - Upload avatars (images, process with sharp: resize, optimize).
 - Nickname lists (bulk add text).
@@ -277,34 +277,34 @@
 - Shared blast service: pick targets (group or custom list or data pool), exclude opted-out/DND, create recipients, enqueue with randomized delays.
 - Per-number daily cap + global safety throttle.
 - Full status (draft/scheduled/running/paused/completed), live counters (sent/failed), export unsent.
-- Two types: 粉丝群发 (to existing contacts/fans) and 爆粉群发 (cold to strangers from 群发号码池).
+- Two types: fan blast (to existing contacts/fans) and cold blast (cold to strangers from blast number pool).
 - For cold: support dedicated number pool or just arbitrary list import.
 - Acceptance: Can create a small fan blast to 5 owned contacts, it runs via real sessions with delays, stats update, can pause/export unsent.
 - Agent: backend + jobs. Est: 3d
 
-**6.3** 群发号码池 (cold pool) + 爆粉群发 UI/flows (p19-20)
+**6.3** Blast number pool (cold pool) + cold blast UI/flows (p19-20)
 - Prereqs: 6.2
 - Dedicated storage or tag/filter for "cold blast numbers".
-- Blast using it, stats (PDF p19 "点击更多，点击统计").
+- Blast using it, stats (PDF p19 "click More, then Statistics").
 - Acceptance: Full cold blast flow as PDF, even if you won't use daily.
 - Agent: backend. Est: 1d
 
-**6.4** 粉丝群发 + stats + export unsent (p24)
+**6.4** Fan blast + stats + export unsent (p24)
 - Prereqs: 6.2
 - Target existing fans/contacts (by group/tag/status).
-- Right-side "统计", export unsent.
+- Right-side statistics panel, export unsent.
 - Acceptance: PDF p24 flows.
 - Agent: backend. Est: 0.5d (mostly covered by 6.2)
 
 ---
 
-## Phase 7: Group Tools (拉群管理) + Inheritance
+## Phase 7: Group Tools (Group Pull Management) + Inheritance
 
-**7.1** Group pull tasks (拉群 p34-39)
+**7.1** Group pull tasks (p34-39)
 - Prereqs: 2.1 (group actions in Baileys), 3.2
 - Create task: choose "admin" number(s) that will have privileges (scanned/owned with rights), target list or count, group subject.
 - Execute: create group (or use existing), generate invite code / QR (display in UI), add members using the admin number(s).
-- Note per PDF: "扫码进群的号（一般劫持号才能拉群）" — implement the flow; in your case the "hijack" numbers are your controlled org numbers.
+- Note per PDF: scan-linked numbers (typically scan-linked numbers have group-add privileges) — implement the flow; in your case the "hijack" numbers are your controlled org numbers.
 - View created groups list.
 - Acceptance: Full end-to-end: create task → QR appears → "add" test members via a privileged number → group visible with members.
 - Agent: backend-engine. Est: 2.5d
@@ -319,7 +319,7 @@
 
 ---
 
-## Phase 8: Customer Service Desk (客服台) — The Daily Operational Heart (p25-27, p40-47, p50)
+## Phase 8: Customer Service Desk — The Daily Operational Heart (p25-27, p40-47, p50)
 
 This is what agents use 90% of the time. Prioritize highly.
 
@@ -345,13 +345,13 @@ This is what agents use 90% of the time. Prioritize highly.
 - Acceptance: Two agents + two numbers. Real phone sends to one number → both (or permitted) agents see it live in desk, can reply from the desk, other sees it. Matches PDF chat flow.
 - Agent: **backend + realtime specialist**. Est: 4d (core value)
 
-**8.3** Group chat in desk, revoke, 通讯录 pull (p43-44)
+**8.3** Group chat in desk, revoke, address book pull (p43-44)
 - Prereqs: 8.2, 7.1
-- Groups created via 拉群 appear in the desk for permitted agents.
+- Groups created via group pull appear in the desk for permitted agents.
 - Chat in group as the WS number.
 - Right-click revoke (delete for everyone? or just you — implement what Baileys supports + log).
-- 通讯录 (address book): manual pull / search fans, add to current session or assign.
-- Acceptance: Supervisor creates group with 拉群, it shows in CS desk, agent can send in group, pull a contact into the session view.
+- Address book: manual pull / search fans, add to current session or assign.
+- Acceptance: Supervisor creates group with group pull, it shows in CS desk, agent can send in group, pull a contact into the session view.
 - Agent: backend. Est: 2d
 
 **8.4** Quick replies from materials, settings, full filters (p47, p52)
@@ -403,13 +403,13 @@ This is what agents use 90% of the time. Prioritize highly.
 
 ## Phase 10: Frontend Desks to Match PDF Visual/UX Density + Polish
 
-**10.1** Supervisor desk pages (import, groups, ports, warehouse, warming tasks, materials, diversion, blasts, 拉群, stats)
+**10.1** Supervisor desk pages (import, groups, ports, warehouse, warming tasks, materials, diversion, blasts, group pull, stats)
 - Prereqs: Backend phases 3-7, 9 mostly done
-- Build pages that look/feel like the screenshot flows (tables with search, batch checkboxes, right-click or "more" menus, status badges "执行中", QR modals, etc.).
+- Build pages that look/feel like the screenshot flows (tables with search, batch checkboxes, right-click or "more" menus, status badges "executing", QR modals, etc.).
 - Use the API + Socket for live updates (e.g. task status changes).
 - Agent: frontend. Est: 4-6d (big UI work)
 
-**10.2** CS Desk full UI (sessions, chat bubbles, materials quick select, group chat, 通讯录, filters, agent switcher)
+**10.2** CS Desk full UI (sessions, chat bubbles, materials quick select, group chat, address book, filters, agent switcher)
 - Prereqs: 8.x complete backend, 10.1 patterns
 - Real-time chat that feels native (input, send, incoming bubbles, typing, unread badges).
 - Multi-number switcher, customer list per number.
@@ -417,14 +417,14 @@ This is what agents use 90% of the time. Prioritize highly.
 
 **10.3** Login flows for supervisor vs CS, role-based routing, responsive or desktop-like layout
 - Prereqs: 0.5, 8.1
-- After login, land in correct "desk" or have switcher (主管台 / 客服台).
+- After login, land in correct "desk" or have switcher (supervisor desk / customer service desk).
 - Permission-driven UI (hide buttons if no perm).
 - Acceptance: Agent logs in → sees only CS desk + limited numbers. Supervisor sees full control.
 - Agent: frontend. Est: 1.5d
 
 **10.4** Polish: loading states, error toasts, confirmation modals (esp for batch/dangerous), mobile-unfriendly but desktop-optimized (like PDF)
 - Prereqs: 10.1-10.3
-- Make it feel "生产就绪" for ops team.
+- Make it feel production-ready for ops team.
 - Agent: frontend. Est: 2d
 
 ---

@@ -67,6 +67,38 @@ export class EmulatorService {
   }
 
   /**
+   * Find an existing emulator record or create one.
+   * Avoids duplicate-key errors on cloud_emulators.ws_account_id (one row per account).
+   */
+  async getOrCreateEmulatorRecord({ wsAccountId = null, phone = null, host = 'localhost', metadata = {} } = {}) {
+    if (wsAccountId) {
+      const existing = await db('cloud_emulators').where({ ws_account_id: wsAccountId }).first();
+      if (existing) {
+        logger.info('Reusing existing cloud emulator record', { emulatorId: existing.id, wsAccountId });
+        return existing;
+      }
+    }
+
+    if (phone) {
+      const existing = await db('cloud_emulators')
+        .where({ phone })
+        .whereNot('status', 'released')
+        .orderBy('created_at', 'desc')
+        .first();
+      if (existing) {
+        if (wsAccountId && !existing.ws_account_id) {
+          await this.updateEmulator(existing.id, { ws_account_id: wsAccountId });
+          existing.ws_account_id = wsAccountId;
+        }
+        logger.info('Reusing existing cloud emulator record', { emulatorId: existing.id, phone });
+        return existing;
+      }
+    }
+
+    return this.createEmulatorRecord({ wsAccountId, phone, host, metadata });
+  }
+
+  /**
    * Get emulator record
    */
   async getEmulator(emulatorId) {
@@ -250,7 +282,9 @@ export class EmulatorService {
     await this.updateEmulator(emulatorId, { status: 'linking' });
 
     try {
-      const code = await sessionManager.requestPairingCode(account.id, account.phone);
+      const code = await sessionManager.requestPairingCode(account.id, account.phone, {
+        forceNew: emulator.status === 'error',
+      });
 
       await this.updateEmulator(emulatorId, {
         status: 'linked',
@@ -299,7 +333,7 @@ export class EmulatorService {
     }
     if (options.phone && !createOpts.phone) createOpts.phone = options.phone;
 
-    const emulator = await this.createEmulatorRecord({
+    const emulator = await this.getOrCreateEmulatorRecord({
       ...createOpts,
       host: options.host,
       metadata: options.metadata,
@@ -340,6 +374,35 @@ export class EmulatorService {
     await this.stopWaydroidSession(emulatorId);
     // Optionally you can leave the record for audit
     return this.updateEmulator(emulatorId, { status: 'stopped' });
+  }
+
+  /**
+   * Keep the Baileys socket alive while the operator enters the pairing code in WhatsApp.
+   */
+  waitForLink(accountId, timeoutMs = 180000) {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        sessionManager.pairingInProgress.delete(accountId);
+        cleanup();
+        reject(new Error(
+          'Timed out waiting for Baileys link. Enter the pairing code on the primary WhatsApp faster, or re-run to get a fresh code.'
+        ));
+      }, timeoutMs);
+
+      const onConnected = ({ accountId: id }) => {
+        if (id === accountId) {
+          cleanup();
+          resolve();
+        }
+      };
+
+      const cleanup = () => {
+        clearTimeout(timeout);
+        sessionManager.off('connected', onConnected);
+      };
+
+      sessionManager.on('connected', onConnected);
+    });
   }
 }
 

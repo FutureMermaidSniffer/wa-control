@@ -1,5 +1,5 @@
 /**
- * Warming worker - executes 养号 steps on live sessions.
+ * Warming worker - executes number-warming steps on live sessions.
  * This is the heart of Phase 4.
  */
 import { Worker } from 'bullmq';
@@ -42,7 +42,7 @@ export function startWarmingWorker() {
 
       const sock = await sessionManager.getOrCreateSocket(task.ws_account_id).catch(() => null);
 
-      // 1. Profile updates (nick + avatar) - core for 养号
+      // 1. Profile updates (nick + avatar) - core for number warming
       try {
         const nicks = await db('materials').where({ type: 'nickname' }).select('content');
         if (nicks.length && sock) {
@@ -82,7 +82,7 @@ export function startWarmingWorker() {
         } catch (e) {}
       }
 
-      // 4. For fast_warm or later days: simulate joining a "warm group" slowly (placeholder - real 拉群 separate)
+      // 4. For fast_warm or later days: simulate joining a "warm group" slowly (placeholder - real group pulls are separate)
       if (isFast || (task.progress_days || 0) > 3) {
         if (sock && Math.random() < 0.4) {
           logger.info('Warming: simulated light group presence', { taskId });
@@ -107,7 +107,7 @@ export function startWarmingWorker() {
         try {
           const gradNicks = await db('materials').where({ type: 'nickname' }).select('content');
           if (gradNicks.length) {
-            const nick = gradNicks[Math.floor(Math.random() * gradNicks.length)].content + ' (已养成)';
+            const nick = gradNicks[Math.floor(Math.random() * gradNicks.length)].content + ' (warmed)';
             await sessionManager.updateProfile(task.ws_account_id, { name: nick }).catch(() => {});
           }
         } catch (e) {}

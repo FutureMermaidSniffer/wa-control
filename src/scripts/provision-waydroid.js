@@ -66,6 +66,16 @@ async function main() {
     console.log('\n' + result.linkResult.instructions);
     if (result.linkResult.accountId) {
       console.log('\nMinimal account created (port will be allocated on successful link):', result.linkResult.accountId);
+      console.log('\n>>> ENTER THIS CODE ON THE PRIMARY WHATSAPP FOR THIS NUMBER <<<');
+      console.log('    WhatsApp → Settings → Linked devices → Link a device');
+      console.log('    (Use the registered WhatsApp on your emulator/phone — NOT a different device.)');
+      console.log('\nIMPORTANT:');
+      console.log('  - Enter the code within ~60 seconds on the PRIMARY WhatsApp for this number.');
+      console.log('  - Do NOT re-run this script while waiting (that invalidates the code).');
+      console.log('  - "Connection Failure" retries are slowed down to preserve the code.');
+      console.log('  - For reliability, prefer: npm start + POST /sessions/connect with usePairingCode, or QR login.\n');
+      await service.waitForLink(result.linkResult.accountId);
+      console.log('\n✓ Linked successfully! Account is active. Port allocated on connection open.');
     }
     console.log('\nShutdown when done:');
     console.log(`  node src/scripts/provision-waydroid.js --shutdown ${result.emulator.id}`);

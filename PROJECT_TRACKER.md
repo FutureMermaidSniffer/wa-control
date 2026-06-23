@@ -15,7 +15,7 @@
 
 This document starts with a **retrospective** of what has been achieved so far (synthesized from implementation work against the plan). Going forward, **every change** will be appended here (typically at the bottom under "Change Log" or per-phase updates), including direct links to the source files/documents that implement the functionality.
 
-**Overall Status**: Substantial progress on critical path (0-Setup → 2-WA Core → 3-Ports/Accounts → 4-Warming → 8-Desk + supporting 5/6 Materials/Contacts). Core "raw control + 养号 + 客服台" loops are functional with proxies, realtime, persistence, and avatar warming. Not yet at full PDF parity or production hardening (e.g., no full blasts, group pulls, or extensive E2E testing with real devices).
+**Overall Status**: Substantial progress on critical path (0-Setup → 2-WA Core → 3-Ports/Accounts → 4-Warming → 8-Desk + supporting 5/6 Materials/Contacts). Core "raw control + number warming + customer service desk" loops are functional with proxies, realtime, persistence, and avatar warming. Not yet at full PDF parity or production hardening (e.g., no full blasts, group pulls, or extensive E2E testing with real devices).
 
 See [TASKS.md](TASKS.md) for full agent-assignable breakdown, estimates, and parallelization notes.
 
@@ -55,13 +55,13 @@ See [TASKS.md](TASKS.md) for full agent-assignable breakdown, estimates, and par
   - Responsible: Shared manager in [src/api/controllers/sessions.controller.js](src/api/controllers/sessions.controller.js) + [src/index.js](src/index.js) (app.set + events), [src/api/routes/sessions.routes.js](src/api/routes/sessions.routes.js) (protected)
 
 ### Phase 3: Ports, Accounts, Groups, Warehouse, Import (Substantial)
-- **3.1-3.4**: Port purchase/allocation (type normal/fast_warm, dates, usage count), WS account CRUD + "常规六段号" style import (CSV-like), groups, batch ops skeleton, warehouse (move releases port), delete + audit, data migration stub, stats.
+- **3.1-3.4**: Port purchase/allocation (type normal/fast_warm, dates, usage count), WS account CRUD + standard six-segment number format import (CSV-like), groups, batch ops skeleton, warehouse (move releases port), delete + audit, data migration stub, stats.
   - Responsible: [src/api/controllers/ports.controller.js](src/api/controllers/ports.controller.js) + [src/api/routes/ports.routes.js](src/api/routes/ports.routes.js) (auth), [src/api/controllers/accounts.controller.js](src/api/controllers/accounts.controller.js) + [src/api/routes/accounts.routes.js](src/api/routes/accounts.routes.js), data layers above, port increment/decrement logic.
 
 ### Phase 4: Warming System (Key Requirement - Completed)
 - **4.1-4.3**: Warming pools/tasks (enter only if offline, modes normal/fast, progress, schedule), BullMQ queues + worker (repeatable steps: ensure session, apply random nick/avatar from materials, self test msg, presence sim, light group presence for fast_warm, vary intensity/volume, ramp progress, **completion to active + graduation profile**, mode-based realistic delays/scheduling, basic safety throttling), monitoring (in-warm/completed counts + per-task pause in UI), pause/resume.
   - Responsible: [src/api/controllers/warming.controller.js](src/api/controllers/warming.controller.js) + [src/api/routes/warming.routes.js](src/api/routes/warming.routes.js) (mode support + initial delay by mode), [src/jobs/queues.js](src/jobs/queues.js), [src/jobs/workers/warming.worker.js](src/jobs/workers/warming.worker.js) (enhanced multi-behavior sim + graduation on complete + mode-aware reschedule), [src/data/warming.data.js](src/data/warming.data.js), [src/index.js](src/index.js) (startup), UI monitoring + actions in [frontend/public/index.html](frontend/public/index.html) (warming tab: summary header, Actions column, pauseWarmingTask)
-  - **Notes**: 养号 now includes varied intensity (normal vs 速养), realistic profile + activity + receiving sim. Proper exit to "active" with optional graduation nick per 4.3. **Group pull (拉群) is NOT part of warming** — it is separate Phase 7 (拉群管理 using privileged adds). Monitoring added per 4.3. Reschedule uses demo values (easy to make production hours-long).
+  - **Notes**: Number warming now includes varied intensity (normal vs fast warm), realistic profile + activity + receiving sim. Proper exit to "active" with optional graduation nick per 4.3. **Group pull is NOT part of warming** — it is separate Phase 7 (group pull management using privileged adds). Monitoring added per 4.3. Reschedule uses demo values (easy to make production hours-long).
 
 ### Phase 5: Contacts, Tags, Diversion (Partial + Integrated)
 - Contacts full search/import/export + auto-capture/assignment on any message (in/out) to ws_account.
@@ -74,7 +74,7 @@ See [TASKS.md](TASKS.md) for full agent-assignable breakdown, estimates, and par
 - Blasts (6.2-6.4): Tables in 002, but no engine/queues/UI yet (next priority candidate).
 
 ### Phase 7: Group Tools + Inheritance (Tables Only)
-- group_pulls table + basic model in 002. No execution flows yet (拉群, fan inheritance).
+- group_pulls table + basic model in 002. No execution flows yet (group pull, fan inheritance).
 
 ### Phase 8: Customer Service Desk (Core + Realtime Functional)
 - **8.1-8.5**: Agent auth/roles (via shared), core desk (sessions view, customer list per number, chat thread with history/realtime incoming, filters), send via correct session, persistence, unread/pinned, group chat stub, quick replies stub, export history stub.
@@ -105,7 +105,7 @@ See [TASKS.md](TASKS.md) for full agent-assignable breakdown, estimates, and par
 - **Notes**: What it enables, related tests, open items, links to PRs/commits if any.
 
 ### 2026-06-05 (Session - Avatar Upload + Materials Completion + UI + Warming Integration)
-- **Change/Feature**: Full avatar upload pipeline for 素材库 (Phase 6.1) + integration with warming (Phase 4) + desk/materials UI updates + /uploads serve. Enables real profile picture mutation during 养号.
+- **Change/Feature**: Full avatar upload pipeline for materials library (Phase 6.1) + integration with warming (Phase 4) + desk/materials UI updates + /uploads serve. Enables real profile picture mutation during number warming.
   - **Status**: Done (core end-to-end functional; placeholder seed + UI preview)
   - **Responsible Documents/Files**:
     - Backend upload/processing: [src/api/controllers/materials.controller.js](src/api/controllers/materials.controller.js) (multer handling, sharp resize, file save, delete cleanup), [src/api/routes/materials.routes.js](src/api/routes/materials.routes.js) (upload.single middleware)
@@ -171,8 +171,8 @@ This cleanly separates:
   - UI dropdown + quantity + "Acquire" + table of acquired numbers + one-click "Provision (Waydroid + Pairing)".
   - Requires `GRIZZLY_API_KEY` env var.
 
-### 2026-06 (Current Session - 拉群/Group Pulls 7.1 + Cold Blasts + Desk Polish)
-- **Change/Feature**: Implemented core 拉群 (group pull / 7.1) end-to-end foundation + expanded blasts to full cold (爆粉群发) + desk quick replies (8.4) + group message passthrough. Directly addresses previous Open priorities.
+### 2026-06 (Current Session - Group Pulls 7.1 + Cold Blasts + Desk Polish)
+- **Change/Feature**: Implemented core group pull (7.1) end-to-end foundation + expanded blasts to full cold blast + desk quick replies (8.4) + group message passthrough. Directly addresses previous Open priorities.
   - **Status**: Done (MVP functional: create/execute pulls using live admin sessions, group creation + invite code/link surfacing, add members via privileged number, BullMQ worker for adds; cold blast create + targeting by explicit phone list + same worker path; quick material message insert in CS desk; relaxed group handling in realtime).
   - **Responsible Documents/Files**:
     - SessionManager group primitives: [src/core/sessions/SessionManager.js](src/core/sessions/SessionManager.js) (createGroup, getGroupInviteCode, addParticipantsToGroup, getGroupMetadata, leaveGroup + updated TODO removal)
@@ -190,8 +190,8 @@ This cleanly separates:
 
 ## Open / Next Priorities (from TASKS.md Critical Path + User Direction)
 
-- 拉群 full (7.1 complete for basic; enhance with member tracking, QR display in UI, bulk from contact lists).
-- Desk group chat + revoke + 通讯录 pull (8.3) now easier with group message passthrough.
+- Group pull full (7.1 complete for basic; enhance with member tracking, QR display in UI, bulk from contact lists).
+- Desk group chat + revoke + address book pull (8.3) now easier with group message passthrough.
 - Blast polish (stats, better cold targeting from a stored pool, UI for unsent export as real file).
 - Warming exit/graduation + monitoring dashboard (4.3).
 - History export central (8.5 / 9.2).

@@ -1,7 +1,7 @@
 import db from '../db/connection.js';
 
 /**
- * Data access for group_pulls (拉群 tasks).
+ * Data access for group_pulls (group pull tasks).
  * Mirrors patterns in warming.data.js / blasts.data.js
  */
 

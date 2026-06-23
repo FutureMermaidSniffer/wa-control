@@ -171,7 +171,7 @@ sessionManager.on('messages.upsert', async ({ accountId, messages }) => {
 
       const isGroup = remoteJid.includes('@g.us');
       const contactPhone = isGroup ? remoteJid : remoteJid.replace(/@.*/, '');
-      // Groups are now passed through (for 拉群 desk + future group chat). Conversation key uses full jid for groups.
+      // Groups are now passed through (for group-pull desk + future group chat). Conversation key uses full jid for groups.
       const text = msg.message?.conversation ||
                    msg.message?.extendedTextMessage?.text ||
                    (msg.message?.imageMessage ? '[image]' : '') ||
@@ -251,7 +251,7 @@ const port = config.PORT;
 httpServer.listen(port, () => {
   logger.info(`🚀 WA Control server running on port ${port} [${config.NODE_ENV}]`);
   logger.info('   See TASKS.md for the full agent-assignable implementation plan.');
-  logger.info('   Progress: Phase 0-3 core + 4 warming + 6.1-6.2 materials+blasts(fan+cold) + 7.1 拉群/group-pulls + 8 desk + contacts + live at /');
+  logger.info('   Progress: Phase 0-3 core + 4 warming + 6.1-6.2 materials+blasts(fan+cold) + 7.1 group-pulls + 8 desk + contacts + live at /');
   logger.info('   Login: supervisor@local / admin123 | UI: http://localhost:3000');
 });
 

@@ -1,5 +1,5 @@
 /**
- * Group Pull worker (拉群 background execution).
+ * Group Pull worker (background execution).
  * Handles the "adding members" phase after group creation + invite generation.
  * Uses the groupPullQueue.
  */

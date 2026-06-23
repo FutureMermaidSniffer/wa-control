@@ -11,7 +11,7 @@ export async function up(knex) {
     t.primary(['role', 'permission_id']);
   });
 
-  // Warming pools (养号池)
+  // Warming pools
   await knex.schema.createTable('warming_pools', (t) => {
     t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
     t.string('name').notNullable().defaultTo('Default Warm Pool');
@@ -21,7 +21,7 @@ export async function up(knex) {
     t.timestamps(true, true);
   });
 
-  // Warming tasks (养号任务)
+  // Warming tasks
   await knex.schema.createTable('warming_tasks', (t) => {
     t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
     t.uuid('ws_account_id').references('id').inTable('ws_accounts').onDelete('CASCADE').notNullable();
@@ -49,7 +49,7 @@ export async function up(knex) {
     // may already exist or column not ready; ignore for idempotency in dev
   }
 
-  // Diversion links (分流链接)
+  // Diversion links
   await knex.schema.createTable('diversion_links', (t) => {
     t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
     t.uuid('target_ws_account_id').references('id').inTable('ws_accounts').onDelete('SET NULL');
@@ -62,10 +62,10 @@ export async function up(knex) {
     t.timestamps(true, true);
   });
 
-  // Blast campaigns (群发)
+  // Blast campaigns
   await knex.schema.createTable('blast_campaigns', (t) => {
     t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
-    t.enum('type', ['fan', 'cold']).notNullable(); // 粉丝群发 / 爆粉群发
+    t.enum('type', ['fan', 'cold']).notNullable(); // fan blast / cold blast
     t.string('name');
     t.uuid('created_by'); // user id
     t.enum('status', ['draft', 'scheduled', 'running', 'paused', 'completed', 'failed']).defaultTo('draft');
@@ -93,7 +93,7 @@ export async function up(knex) {
     t.timestamps(true, true);
   });
 
-  // Group pulls (拉群)
+  // Group pulls
   await knex.schema.createTable('group_pulls', (t) => {
     t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
     t.string('subject').notNullable();
