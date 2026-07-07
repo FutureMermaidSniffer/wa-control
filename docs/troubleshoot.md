@@ -1,5 +1,202 @@
 
-You are hitting the error because you are running waydroid session start directly. The project (and working headless Waydroid) needs a compositor.
+# Troubleshooting: WhatsApp Pairing via Proxy (Baileys)
+
+This document summarises the main problems encountered when using `/api/v1/sessions/connect` with `usePairingCode: true` behind a residential proxy.
+
+## 1. Phone receives no notification / "couldn't link device"
+
+**Symptom**
+- You call the endpoint and receive an 8-digit code.
+- You paste the code on the phone instantly.
+- WhatsApp shows "couldn't link device".
+
+**Root Cause**
+The code returned by Baileys is generated **locally** on the client side (`bytesToCrockford(randomBytes(5))`).  
+WhatsApp servers only push a notification (or show the code entry screen) to the primary device **after** a successful `companion_hello` IQ has been accepted from the companion side.
+
+If you never see any prompt on the phone, the `link_code_companion_reg` (stage `companion_hello`) was rejected before it could register a pending link.
+
+**Typical Log Pattern**
+```
+[PAIRING] Creating Baileys socket ... USING PROXY ...
+[PAIRING] Socket created ... awaiting ready...
+[PAIRING] Ready event, awaiting socket open...
+warn: Session CLOSED ... WebSocket Error (Socks5 proxy rejected connection - NotAllowed)
+{"error":"Connection Closed"}
+```
+
+**Fix / Workaround**
+- The proxy itself must be able to reach WhatsApp's servers.
+- General wss tests (e.g. to echo.websocket.events) are **not** sufficient.
+- Use a proxy pool that is not blocked for WhatsApp device linking.
+
+---
+
+## 2. SOCKS5 Proxy "rejected connection - NotAllowed"
+
+**Symptom**
+```
+WebSocket Error (Socks5 proxy rejected connection - NotAllowed) (reconnect=true)
+```
+
+**Root Cause**
+The proxy server (in this case `proxy-us.proxy-cheap.com:9595`, username `...-res-any`) explicitly refuses the outbound connection to `web.whatsapp.com`.
+
+The general WebSocket test succeeded:
+```
+✅ SOCKS5 + wss OPEN (tunnel works)
+```
+
+But WhatsApp's specific endpoint is blocked at the proxy level for this pool.
+
+**Why it happens**
+- "res-any" / heavily shared residential pools are frequently flagged by Meta.
+- The provider itself may start rejecting WhatsApp destinations to protect other users.
+
+**How to confirm**
+```bash
+# Basic IP test (often still works)
+curl -v --socks5-hostname user:pass@host:9595 https://ipv4.icanhazip.com
+
+# WhatsApp-specific test (will usually fail or be very slow)
+curl -v --socks5-hostname user:pass@host:9595 -I https://web.whatsapp.com
+```
+
+**Solution**
+Obtain a different proxy (different pool, "fixed" residential, or one the provider confirms works with WhatsApp).  
+Import it as `socks5` and pass the new `proxyId`.
+
+---
+
+## 3. HTTP Proxy causes timeout on "awaiting socket open"
+
+**Symptom**
+```
+[PAIRING] Ready event, awaiting socket open (this can hang if proxy tunnel is slow or not supported)...
+{"error":"Timed out waiting for socket ready through proxy after 30000ms..."}
+```
+
+**Root Cause**
+The HTTP proxy (port 5959) was either:
+- Very slow to establish the wss tunnel, or
+- Not completing the CONNECT for WhatsApp's servers.
+
+We added a 30 s timeout to stop the HTTP request from hanging forever.
+
+**Lesson**
+HTTP proxies (especially on non-standard ports) are less reliable for long-lived binary WebSocket connections than SOCKS5.
+
+---
+
+## 4. Wrong proxy file / credentials used
+
+**Common mistake**
+Using the content of `proxys` (HTTP, port 5959, `resfix` user) when you intended to use SOCKS5 from `proxy-sock5` (port 9595, `res-any` user).
+
+**Correct import for SOCKS5**
+```bash
+PROXY_LINE=$(cat proxy-sock5 | sort -u | head -1)
+
+curl -X POST http://localhost:3000/api/v1/proxies/import \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"text\": \"$PROXY_LINE\",
+    \"defaultType\": \"socks5\",
+    \"namePrefix\": \"socks5-res-any-\",
+    \"region\": \"us\"
+  }"
+```
+
+The import will often return `skippedIds` if the host+port already exists:
+```json
+"skippedIds": ["8e20627a-2105-4625-9a3d-8da03c4c5472"]
+```
+
+Use that ID in the connect call:
+```json
+"proxyId": "8e20627a-2105-4625-9a3d-8da03c4c5472"
+```
+
+---
+
+## 5. How to verify which proxy is actually being used
+
+Look for these clear markers in the server logs:
+
+```
+[PAIRING-CONNECT] Using proxy 8e20627a... (socks5://proxy-us...9595)
+>>> PAIRING USING PROXY ID: 8e20627a-... <<<
+[PAIRING] Creating Baileys socket ... USING PROXY id=8e20627a... socks5://...
+[PAIRING-TRANSPORT] Pairing will go through proxy id=8e20627a...
+```
+
+If you still see `http://...5959`, you are still using the old HTTP proxy.
+
+---
+
+## 6. "Connection Closed" or generic errors after socket creation
+
+When the proxy rejects the destination, Baileys surfaces it as:
+
+```
+WebSocket Error (Socks5 proxy rejected connection - NotAllowed)
+{"error":"Connection Closed"}
+```
+
+Even with perfect logging and the MACOS UA patch, if the proxy says "NotAllowed", the connection will never succeed.
+
+---
+
+## Summary – What actually worked / didn't work
+
+| Proxy Type | Port | Result                              | Reason                              |
+|------------|------|-------------------------------------|-------------------------------------|
+| HTTP       | 5959 | Timeout on socket open              | Slow / unreliable for wss           |
+| SOCKS5 (res-any) | 9595 | Proxy rejects with "NotAllowed" | Pool blocked for WhatsApp           |
+| General wss test | -    | ✅ Worked                           | Proxy allows non-WA destinations    |
+
+**Conclusion**: The code side (proxy selection, logging, MACOS patch, timeouts, clear error surfacing) is now solid. The remaining blocker is finding a residential proxy that the provider and WhatsApp both allow for device linking.
+
+---
+
+## Recommended Debugging Commands
+
+```bash
+# List proxies and their IDs
+curl -H "Authorization: Bearer $TOKEN" http://localhost:3000/api/v1/proxies
+
+# Import SOCKS5 from the right file
+PROXY_LINE=$(cat proxy-sock5 | sort -u | head -1)
+curl ... /proxies/import -d "{ \"text\": \"$PROXY_LINE\", \"defaultType\": \"socks5\" ... }"
+
+# Test basic reachability through SOCKS5
+curl -v --socks5-hostname user:pass@host:9595 -I https://web.whatsapp.com
+
+# Test WebSocket tunnel (use a reliable echo)
+PROXY_LINE=$(cat proxy-sock5 | head -1)
+PROXY_URL="socks5://${PROXY_LINE}"
+node -e '
+  const {SocksProxyAgent} = require("socks-proxy-agent");
+  const WebSocket = require("ws");
+  const agent = new SocksProxyAgent(process.env.PROXY_URL);
+  const ws = new WebSocket("wss://ws.postman-echo.com/raw", {agent});
+  ...
+'
+```
+
+---
+
+## Code Mitigations Already Implemented
+
+- Proxy ID is now printed with `>>>` markers and `[PAIRING-*]` tags.
+- 30 s timeout on socket ready (prevents hanging curls).
+- `socks5h://` used for remote DNS.
+- MACOS Desktop UA + platform patch to reduce 405 errors.
+- Auto-assignment of proxy for pairing flows when none specified.
+- Import endpoint returns `skippedIds` so you can still obtain the ID.
+- Clearer error messages when a proxy explicitly rejects the connection.
+
 
 Correct sequence (recommended for testing with scrcpy):
 

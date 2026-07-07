@@ -36,7 +36,8 @@ export function parseProxyText(text, options = {}) {
     const protoMatch = working.match(/^(socks5?|http|https):\/\//i);
     if (protoMatch) {
       const proto = protoMatch[1].toLowerCase();
-      hintedType = (proto === 'socks5' || proto === 'socks') ? 'socks5' : 'http';
+      if (proto === 'socks5' || proto === 'socks') hintedType = 'socks5';
+      else if (proto === 'http' || proto === 'https') hintedType = 'http';
       working = working.replace(protoMatch[0], '');
     }
 

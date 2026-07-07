@@ -34,6 +34,13 @@ const envSchema = z.object({
 
   // Redis for BullMQ etc (optional at early bootstrap)
   REDIS_URL: z.string().optional(),
+
+  // MoreLogin Cloud Phone (outsourced emulator replacement)
+  MORELOGIN_API_ID: z.string().optional(),
+  MORELOGIN_API_KEY: z.string().optional(),
+  MORELOGIN_LOCAL_API: z.string().url().default('http://127.0.0.1:40000'),
+  MORELOGIN_DEFAULT_SKU_ID: z.string().default('10004'),
+  MORELOGIN_MODE: z.enum(['open', 'local']).default('open'),
 });
 
 let config;

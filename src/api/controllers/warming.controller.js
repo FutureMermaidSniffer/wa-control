@@ -17,8 +17,14 @@ export async function enterWarmingPool(req, res, next) {
 
     const acc = await wsAccountsData.findById(ws_account_id);
     if (!acc) return res.status(404).json({ error: 'Account not found' });
-    if (acc.status !== 'offline') {
-      return res.status(400).json({ error: 'Account must be offline to enter warming pool' });
+
+    // Allow warming for accounts that are linked (just paired via Baileys), offline, active, or in error.
+    // Previously only 'offline' was accepted — this blocked warming right after a successful link.
+    const warmingEligible = ['offline', 'linked', 'active', 'error', 'primary_registered'];
+    if (!warmingEligible.includes(acc.status)) {
+      return res.status(400).json({
+        error: `Account status '${acc.status}' is not eligible for warming. Must be one of: ${warmingEligible.join(', ')}`,
+      });
     }
 
     const task = await warmingData.createWarmingTask({

@@ -25,12 +25,18 @@ This document explains how to operate the wa-control system **without any physic
 
 This gives you true "cloud WhatsApp" numbers that only ever lived in virtualized environments.
 
-## Recommended Cloud Android Stack
+## Recommended Cloud Android Stack (2026 update)
 
-### Option A: Self-hosted (cheapest, most control)
-- **Android-x86** running in QEMU/KVM on a VPS (Hetzner, OVH, AWS, GCP, etc.)
-- **Waydroid** (lightweight Android container on Linux — very popular for this use case)
-- **Anbox** / **Anbox Cloud**
+**Preferred: Outsourced MoreLogin Cloud Phones** (fully implemented)
+- Use Open API + Local API at `https://api.morelogin.com`
+- See `docs/MORELOGIN_INTEGRATION_PLAN.md` and `src/cloud/morelogin.*`
+- Separate sequence: supplier number+code → create ML cloud phone → install WA + enter code on it → Baileys link → power off.
+- Always powerOff after primary registration to control cost.
+- SKU examples: 10004 (Android 15)
+
+### Legacy Option A: Self-hosted (Waydroid etc)
+- **Android-x86** running in QEMU/KVM...
+- **Waydroid** (kept for transition only; new work uses MoreLogin)
 
 Example setup (Waydroid on Ubuntu VPS):
 ```bash
@@ -144,3 +150,58 @@ The existing UI already surfaces QR codes via Socket.io. You can extend the fron
 This gives you a fully cloud-native, phone-less pipeline while still using the powerful raw Baileys control that wa-control provides.
 
 If you implement the automation layer on top of this, feel free to contribute back the helper scripts!
+
+## Troubleshooting "couldn't link device" (even when pasting fast)
+
+This is usually caused by WhatsApp server rejecting the companion handshake from Baileys:
+
+- **Primary cause (fixed in this version)**: Browser identifier sent in pairing request + UA. We now default to `Browsers.macOS('Desktop')` (and env `WA_BROWSER=mac` override). Ubuntu/Chrome often gets 405/408/515 during `companion_hello` → phone shows couldn't link.
+- Reconnects too slow or too spammy after the code is issued (code window is short). We now use sub-second reconnects for restartRequired + reminders.
+- Calling `/connect` again while a code is live (invalidates it).
+- Primary WhatsApp (emulator) not fully registered, or using an old WhatsApp APK that lacks "Link with phone number instead".
+- Using a datacenter/VPS IP without proxy — WA is aggressive about new device links.
+- Partial old `baileys_auth_state` left behind (the code auto-resets when it sees `me` or `pairingCode`).
+
+**Debug while testing**:
+- Use the new `GET /api/v1/sessions/pairing-codes` (auth required) to see live pending codes.
+- Watch the server terminal: we now print a huge visible banner + repeat every ~8s:
+    ```
+    WHATSAPP PAIRING CODE READY ...
+      CODE  : J2W9XBHX
+    ```
+- Look for `[PAIRING-DEBUG]` logs on connection.update.
+- Try with no proxy first (for a test number).
+- Force fresh: pass `"forceNew": true` is not exposed in API yet, but disconnect + re-create account or null the auth_state row manually.
+
+If it still fails consistently, fall back to the QR flow for that number (QR is more tolerant of platform strings in 2026).
+
+### Why your phone receives no notification/prompt at all (the core issue you identified)
+
+Yes — your diagnosis is correct.
+
+The code (`2YC3MDH7` etc.) printed by the server is generated **client-side only**:
+
+```js
+// inside Baileys requestPairingCode
+const pairingCode = customPairingCode ?? bytesToCrockford(randomBytes(5));
+...
+authState.creds.pairingCode = pairingCode;
+await sendNode({ ... 'link_code_companion_reg', stage: 'companion_hello', ... });
+return pairingCode;
+```
+
+WhatsApp servers do not hand you a code. They only create a pending link *if* that `companion_hello` IQ is received and accepted over the websocket. Only then does the primary phone get a notification/push to show the input field.
+
+In your logs you see the banner, then within ~3 seconds:
+
+```
+[PAIRING-DEBUG] ... conn=close ... lastErr=Connection Failure
+```
+
+This means the server terminated the stream (with a failure code, usually 405 or similar) around the time we tried to send (or right after) the hello. No pending link was ever created server-side → your phone never hears about it.
+
+When you open official WhatsApp Web and request the code there, *their* client successfully performs the equivalent hello from a browser context that WA currently trusts, so the notification arrives instantly on the phone.
+
+The macOS Desktop + longer-settle + syncFullHistory changes we made are attempts to look more like a legitimate desktop companion. They are not always sufficient if the source IP, ASN, or other signals look "automated / VPS".
+
+See the enhanced banner that is now printed — it explains exactly this. The new detailed Connection Failure logs also surface the numeric statusCode + data.

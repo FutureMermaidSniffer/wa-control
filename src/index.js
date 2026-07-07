@@ -155,8 +155,36 @@ sessionManager.on('qr', ({ accountId, phone, qr }) => {
 sessionManager.on('pairing_code', ({ accountId, phone, code }) => {
   io.emit('wa:pairing_code', { accountId, phone, code });
 });
-sessionManager.on('connected', ({ accountId, phone }) => {
+sessionManager.on('connected', async ({ accountId, phone }) => {
   io.emit('wa:connected', { accountId, phone });
+
+  // Auto-warming: if the account has auto_warm=true set, immediately schedule a warming task.
+  // This lets operators link a number and have warming start without a second API call.
+  try {
+    const acc = await db('ws_accounts').where({ id: accountId }).first();
+    if (acc?.auto_warm) {
+      const existing = await db('warming_tasks')
+        .where({ ws_account_id: accountId })
+        .whereNotIn('status', ['completed', 'cancelled'])
+        .first();
+      if (!existing) {
+        const { scheduleWarmingTask } = await import('./jobs/queues.js');
+        const warmingData = (await import('./data/warming.data.js')).default;
+        const task = await warmingData.createWarmingTask({
+          ws_account_id: accountId,
+          mode: acc.warm_mode || 'normal',
+          target_days: acc.warm_target_days || 10,
+          status: 'pending',
+          progress_days: 0,
+        });
+        await scheduleWarmingTask(task.id, 5000).catch(() => {});
+        logger.info(`Auto-warming scheduled for ${phone} (accountId=${accountId})`);
+        io.emit('wa:warming_started', { accountId, phone, taskId: task.id });
+      }
+    }
+  } catch (e) {
+    logger.warn('Auto-warm check failed (non-critical)', { accountId, error: e.message });
+  }
 });
 sessionManager.on('disconnected', (payload) => {
   io.emit('wa:disconnected', payload);

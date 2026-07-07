@@ -33,4 +33,38 @@ export async function importContacts(contacts, defaultWs = null) {
   return results;
 }
 
-export default { listContacts, createContact, importContacts };
+export async function cleanNonUsableContacts({ assigned_ws_account_id = null, dryRun = true } = {}) {
+  let q = db('contacts').where({ dnd: true }).orWhere({ opted_in: false });
+  if (assigned_ws_account_id) q = q.andWhere({ assigned_ws_account_id });
+  const toRemove = await q.select('id', 'phone', 'dnd', 'opted_in');
+  if (dryRun) {
+    return { would_remove: toRemove.length, samples: toRemove.slice(0, 5) };
+  }
+  const ids = toRemove.map(c => c.id);
+  if (ids.length) {
+    await db('contacts').whereIn('id', ids).del();
+  }
+  return { removed: toRemove.length, phones: toRemove.map(c => c.phone) };
+}
+
+export async function cleanContactsForBadAccounts(dryRun = true) {
+  // Find ws_accounts that are not usable
+  const badAccounts = await db('ws_accounts')
+    .whereIn('status', ['error', 'banned', 'pending_verification'])  // adjust criteria
+    .select('id');
+  const results = [];
+  for (const acc of badAccounts) {
+    const contacts = await db('contacts').where({ assigned_ws_account_id: acc.id }).select('id', 'phone');
+    if (dryRun) {
+      results.push({ account: acc.id, would_remove: contacts.length, samples: contacts.slice(0,3) });
+    } else {
+      if (contacts.length) {
+        await db('contacts').whereIn('id', contacts.map(c => c.id)).del();
+      }
+      results.push({ account: acc.id, removed: contacts.length });
+    }
+  }
+  return results;
+}
+
+export default { listContacts, createContact, importContacts, cleanNonUsableContacts };

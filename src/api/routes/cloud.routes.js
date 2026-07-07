@@ -14,6 +14,15 @@ import {
   getProviderBalance,
   getOrderStatus,
   releaseNumber,
+  // MoreLogin new separate registration
+  listMoreLoginDevices,
+  createCloudPhoneForReg,
+  installWhatsAppOnPhone,
+  registerNumberOnCloudPhone,
+  moreloginAction,
+  moreloginLink,
+  moreloginPowerOff,
+  fastEnterPhoneOnCloud,
 } from '../controllers/cloud.controller.js';
 import { authenticate, requireRole } from '../middleware/auth.js';
 
@@ -64,5 +73,34 @@ router.post('/cloud/numbers/:id/mark-registered', authenticate, requireRole('sup
 router.get('/cloud/numbers/balance', authenticate, requireRole('supervisor'), getProviderBalance);
 router.get('/cloud/numbers/:id/status', authenticate, requireRole('supervisor'), getOrderStatus);
 router.post('/cloud/numbers/:id/release', authenticate, requireRole('supervisor'), releaseNumber);
+
+// =====================================================
+// MoreLogin Cloud Phones - dedicated separate registration
+// =====================================================
+
+// List raw devices from MoreLogin (useful for debugging / inventory)
+router.get('/cloud/morelogin/devices', authenticate, requireRole('supervisor'), listMoreLoginDevices);
+
+// Create a fresh cloud phone for a number you already have from supplier + have the SMS code for.
+router.post('/cloud/morelogin/create-for-reg', authenticate, requireRole('supervisor'), createCloudPhoneForReg);
+
+// Install WhatsApp (and optionally other apps) on a powered phone
+router.post('/cloud/morelogin/:id/install-whatsapp', authenticate, requireRole('supervisor'), installWhatsAppOnPhone);
+
+// The KEY new endpoint: get number + code from supplier → register it on the cloud phone
+router.post('/cloud/morelogin/register', authenticate, requireRole('supervisor'), registerNumberOnCloudPhone);
+
+// Low-level actions for manual or scripted finishing of registration UI
+// POST body example: { action: "input", text: "123456" } or "click", "exec", "screenshot"
+router.post('/cloud/morelogin/:id/action', authenticate, requireRole('supervisor'), moreloginAction);
+
+// Request Baileys pairing code (primary already registered on the ML cloud phone)
+router.post('/cloud/morelogin/:id/link', authenticate, requireRole('supervisor'), moreloginLink);
+
+// Explicit power off (CRITICAL for cost control)
+router.post('/cloud/morelogin/:id/power-off', authenticate, requireRole('supervisor'), moreloginPowerOff);
+
+// FAST path: call this the moment you have the number string from the supplier
+router.post('/cloud/morelogin/fast-enter-phone', authenticate, requireRole('supervisor'), fastEnterPhoneOnCloud);
 
 export default router;

@@ -53,7 +53,7 @@ export async function importAccounts(req, res, next) {
 export async function updateAccount(req, res, next) {
   try {
     const { id } = req.params;
-    const allowed = ['display_name', 'group_id', 'status', 'notes'];
+    const allowed = ['display_name', 'group_id', 'status', 'notes', 'proxy_id', 'port_id', 'auto_warm'];
     const patch = {};
     for (const k of allowed) if (k in req.body) patch[k] = req.body[k];
     await db('ws_accounts').where({ id }).update({ ...patch, updated_at: db.fn.now() });

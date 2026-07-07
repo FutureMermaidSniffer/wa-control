@@ -1,16 +1,11 @@
 /**
- * Emulator / Cloud Device Provisioning Service
+ * Emulator / Cloud Device Provisioning Service (LEGACY - Waydroid)
  *
- * Purpose: Help run WhatsApp in the cloud (e.g. Waydroid) for phone-less registration,
- * then link it to wa-control via pairing code (no physical phone needed after registration).
+ * Being phased out in favor of MoreLogin outsourced cloud phones.
+ * See src/cloud/morelogin.service.js + docs/MORELOGIN_INTEGRATION_PLAN.md
  *
- * This is a starting point / controller. Full production use requires:
- * - Proper orchestration (Docker, Kubernetes, or dedicated emulator hosts)
- * - Virtual number provider integration for SMS
- * - UI automation or ADB scripting inside the emulator for registration flow
- * - Monitoring and resource management
- *
- * Current focus: Waydroid on Linux hosts (headless-friendly).
+ * New flow (separate reg sequence):
+ *   supplier (number + code) → MoreLogin cloud phone → register WA on it → Baileys link → power off
  */
 
 import { exec, spawn } from 'child_process';
@@ -239,9 +234,10 @@ export class EmulatorService {
   }
 
   /**
-   * Trigger the phone-less linking flow.
-   * Supports transitional phone-first: if no ws_account yet (common for newly acquired Grizzly numbers),
-   * we create a minimal ws_account (status 'pending_verification', no port allocated yet).
+   * Trigger the linking flow for phone primary or cloud emulator primary.
+   * For phone primary (user registered on their phone): call --mark-registered first to set primary_registered.
+   * For emulator: the registration happens in Waydroid.
+   * Supports transitional phone-first: if no ws_account yet, creates minimal (status 'pending_verification' unless marked).
    * Full profile + port allocation happens on successful Baileys connection 'open'.
    */
   async linkWithPairingCode(emulatorId) {
@@ -258,10 +254,11 @@ export class EmulatorService {
       account = await db('ws_accounts').where({ phone: emulator.phone }).first();
 
       if (!account) {
+        const isTestNoPhone = emulator.phone === '+13185167435';
         const [created] = await db('ws_accounts')
           .insert({
             phone: emulator.phone,
-            status: 'pending_verification',
+            status: isTestNoPhone ? 'primary_registered' : 'pending_verification',
             acquisition_method: 'phone_assoc',
             // deliberately no port_id / proxy_id here
           })
@@ -273,13 +270,32 @@ export class EmulatorService {
         logger.info('Created minimal ws_account for transitional phone-first flow (no port yet)', {
           phone: emulator.phone,
           accountId: account.id,
+          status: isTestNoPhone ? 'primary_registered' : 'pending_verification',
         });
       }
     }
 
     if (!account) throw new Error('Could not resolve or create ws_account for linking');
 
+    // Guard: for real numbers, the primary WhatsApp must be registered first (in cloud emulator or on phone).
+    // Baileys can only link companions to already-registered primaries.
+    const isTestNoPhone = account.phone === '+13185167435';
+    if (!isTestNoPhone) {
+      const em = await this.getEmulator(emulatorId);
+      const accountReady = ['primary_registered', 'linked', 'offline', 'error'].includes(account.status);
+      if (!em || (em.status !== 'registered' && !accountReady)) {
+        throw new Error(`Primary WhatsApp for ${account.phone} has not been registered yet (emulator status=${em?.status}, account=${account?.status}). If using phone as primary, ensure --mark-registered was called after phone registration. For emulator, complete registration in cloud first.`);
+      }
+    }
+
     await this.updateEmulator(emulatorId, { status: 'linking' });
+
+    // Revive account status if it went offline from prior failed pairing attempt (phone primary case)
+    if (['offline', 'error'].includes(account.status)) {
+      await db('ws_accounts').where({ id: account.id }).update({ status: 'primary_registered' });
+      account.status = 'primary_registered';
+      logger.info(`[LINK] Revived account status to primary_registered for re-pairing ${account.phone}`);
+    }
 
     try {
       const code = await sessionManager.requestPairingCode(account.id, account.phone, {
@@ -301,7 +317,7 @@ export class EmulatorService {
       return {
         success: true,
         pairingCode: code,
-        instructions: 'Enter this code in the WhatsApp app running inside the Waydroid session. Once linked you can stop the session. Port will be allocated on successful connection.',
+        instructions: 'Enter this code in the WhatsApp app running inside the Waydroid session. Server logs will show huge banner + live reminders of the code. GET /sessions/pairing-codes for visibility. Once linked you can stop the session. Port allocated on open.',
         accountId: account.id,
       };
     } catch (err) {
@@ -358,7 +374,58 @@ export class EmulatorService {
       });
     }
 
-    const linkResult = await this.linkWithPairingCode(emulator.id);
+    // Special support for full-server simulation with no real phone (test number +13185167435)
+    // This allows testing primary_registered -> linking flow entirely server-side using cloud + Baileys.
+    if (createOpts.phone === '+13185167435' || emulator.phone === '+13185167435') {
+      // Full server simulation for test number: fake primary registration complete.
+      // No real WhatsApp is installed or run for this number.
+      try {
+        let acc = await db('ws_accounts').where({ phone: '+13185167435' }).first();
+        if (!acc) {
+          [acc] = await db('ws_accounts').insert({
+            phone: '+13185167435',
+            status: 'primary_registered',
+            acquisition_method: 'phone_assoc',
+            display_name: 'Test No-Phone Account'
+          }).returning('*');
+        } else {
+          await db('ws_accounts').where({ phone: '+13185167435' }).update({ 
+            status: 'primary_registered',
+            display_name: acc.display_name || 'Test No-Phone Account'
+          });
+        }
+        await this.updateEmulator(emulator.id, { 
+          status: 'registered',
+          ws_account_id: acc.id 
+        });
+      } catch (e) {
+        logger.warn('[TEST] Failed to bootstrap test number', e.message);
+      }
+      logger.info('[TEST] +13185167435 treated as fully "primary_registered" with no actual WhatsApp install (simulation only). Baileys will still attempt the companion link, but there is no real primary on WhatsApp servers, so the handshake will fail (this is expected and useful for testing our code paths, error handling, proxy logic, and status machine in isolation).');
+    }
+
+    let linkResult;
+    const isTestNoPhone = createOpts.phone === '+13185167435' || emulator.phone === '+13185167435';
+
+    if (isTestNoPhone && (options.linkOnly || options.assumeRegistered)) {
+      // Pure simulation for test number: do NOT call real linkWithPairingCode / Baileys.
+      // This tests provisioning, emulator record, ws_account creation, status='primary_registered' only.
+      // No real WA primary exists, so no actual companion link attempt or notification will happen.
+      linkResult = {
+        success: true,
+        pairingCode: 'SIM-TEST-CODE-12345678',
+        instructions: 'SIMULATION ONLY for +13185167435. No real primary exists on WhatsApp servers (we only faked our DB state). Use this to test server-side provisioning, status stages, and account creation. To test real Baileys linking + phone notification, register the number on a phone first.',
+        accountId: (await db('ws_accounts').where({ phone: '+13185167435' }).first())?.id,
+        simulation: true
+      };
+      logger.info('[TEST] Pure simulation: skipped real Baileys socket and handshake attempt. Only DB records created.');
+    } else {
+      linkResult = await this.linkWithPairingCode(emulator.id);
+
+      if (isTestNoPhone) {
+        logger.info('[TEST] Pairing code request completed for simulation number (real Baileys path executed). No real device will accept the code.');
+      }
+    }
 
     return {
       emulator,

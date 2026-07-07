@@ -28,6 +28,22 @@ import makeWASocket, {
   BufferJSON,
   makeCacheableSignalKeyStore,
 } from '@whiskeysockets/baileys';
+import { proto } from '@whiskeysockets/baileys/WAProto/index.js';
+
+// One-time global patch: make the "WEB" platform send MACOS (24) instead.
+// This is the #1 fix for 405 "Connection Failure" + "frc" during fresh
+// requestPairingCode / companion_hello. Official web clients present better
+// fingerprints; this makes Baileys look more like a trusted desktop companion.
+// Applied once at load so every socket benefits (especially pairing flows).
+try {
+  const UA = proto?.ClientPayload?.UserAgent?.Platform;
+  if (UA && UA.WEB !== UA.MACOS) {
+    UA.WEB = UA.MACOS; // 24
+    console.log('[WA-PATCH] Forced UserAgent.Platform.WEB → MACOS (24) to bypass 405 on pairing');
+  }
+} catch (e) {
+  console.warn('[WA-PATCH] Could not apply platform patch:', e.message);
+}
 import portsData from '../../data/ports.data.js';
 import https from 'https';
 import { HttpsProxyAgent } from 'https-proxy-agent';
@@ -48,13 +64,29 @@ const socketFamily = process.env.WA_SOCKET_FAMILY
   ? parseInt(process.env.WA_SOCKET_FAMILY, 10)
   : 4;
 
+// Use macOS Desktop browser identifier. Strongly recommended for reliable
+// pairing code flows (avoids 405/515/408 platform rejections that lead to
+// "couldn't link device" even when code is entered fast). Ubuntu/Chrome often
+// triggers server-side link failures during companion_hello.
+const DEFAULT_BROWSER = process.env.WA_BROWSER
+  ? (() => {
+      const b = (process.env.WA_BROWSER || '').toLowerCase();
+      if (b.includes('mac')) return Browsers.macOS('Desktop');
+      if (b.includes('win')) return Browsers.windows('Chrome');
+      if (b.includes('ubuntu')) return Browsers.ubuntu('Chrome');
+      return Browsers.macOS('Desktop');
+    })()
+  : Browsers.macOS('Desktop');
+
 // In-memory registry of active sockets by wsAccountId (string uuid)
 const activeSockets = new Map(); // wsAccountId -> { sock, account, proxy }
 
 /** Pairing codes expire quickly; reuse the same code within this window. */
 const PAIRING_CODE_TTL_MS = 120_000;
 /** Rapid reconnects on WA "Connection Failure" (405) invalidate the phone-side code. */
-const PAIRING_FAILURE_RECONNECT_MS = 10_000;
+const PAIRING_FAILURE_RECONNECT_MS = 6_000;
+/** For restartRequired (common after companion_hello and pair-success), reconnect fast to keep the link window alive. */
+const PAIRING_RESTART_RECONNECT_MS = 250;
 
 export class SessionManager extends EventEmitter {
   constructor(db) {
@@ -65,6 +97,8 @@ export class SessionManager extends EventEmitter {
     this.pairingInProgress = new Map();
     /** @type {Map<string, { resolve: Function, reject: Function, timeout: NodeJS.Timeout }>} */
     this._pairingReadyWaiters = new Map();
+    /** @type {Map<string, NodeJS.Timeout>} reminder timers for visible code echo during testing */
+    this._pairingReminders = new Map();
   }
 
   /**
@@ -101,18 +135,49 @@ export class SessionManager extends EventEmitter {
 
     const { version } = await fetchLatestBaileysVersion();
 
+    // Detect if this socket is for a fresh pairing flow (no registered creds yet)
+    const isLikelyPairing = !state?.creds?.registered || this.pairingInProgress.has(account.id);
+
+    // Use whatever proxy is assigned to the account (or passed in). We now honor proxies
+    // for pairing code flows when user says "use the proxy".
+    const effectiveProxyRow = proxyRow;
+
     const socketConfig = {
       version,
       auth: state,
       printQRInTerminal: false, // we surface QR via events / API
-      browser: Browsers.ubuntu('Chrome'),
+      browser: DEFAULT_BROWSER,
+      // More realistic desktop client for better companion acceptance on real phones
+      waWebVersion: [2, 2412, 1], // match a recent official web version if possible
+      connectTimeoutMs: 90000,
+      keepAliveIntervalMs: 25000,
       logger: baileysLogger.child({ account: account.phone }),
       connectTimeoutMs: 60_000,
       defaultQueryTimeoutMs: 60_000,
       markOnlineOnConnect: false,
-      // Proxy injection + IPv4 fallback for WA websocket (many VPS/Kali setups have broken IPv6)
-      ...this._buildNetworkAgents(proxyRow),
+      // Helps with desktop-like linking in some cases (affects webInfo + history expectations)
+      syncFullHistory: true,
+      // Proxy injection + IPv4 fallback for WA websocket
+      ...this._buildNetworkAgents(effectiveProxyRow),
     };
+
+    if (isLikelyPairing) {
+      const proxyInfo = effectiveProxyRow
+        ? `USING PROXY id=${effectiveProxyRow.id} ${effectiveProxyRow.type}://${effectiveProxyRow.host}:${effectiveProxyRow.port}`
+        : 'DIRECT (no proxy)';
+      logger.info(`[PAIRING] Creating Baileys socket for ${account.phone} — ${proxyInfo} (MACOS UA platform patch is active)`);
+
+      // Also log the proxy choice at transport level for maximum visibility during testing
+      if (effectiveProxyRow) {
+        logger.info(`[PAIRING-TRANSPORT] Pairing will go through proxy id=${effectiveProxyRow.id}`);
+      }
+
+      // Re-assert the platform patch (for 405 fix)
+      try {
+        const UA = proto?.ClientPayload?.UserAgent?.Platform;
+        if (UA) UA.WEB = UA.MACOS;
+      } catch {}
+    }
 
     const sock = makeWASocket(socketConfig);
 
@@ -128,14 +193,29 @@ export class SessionManager extends EventEmitter {
 
       this._resolvePairingReady(account.id, update);
 
+      // Extra diagnostics for pairing troubleshooting (the main source of "couldn't link device")
+      if (this.pairingInProgress.has(account.id)) {
+        const sc = lastDisconnect?.error?.output?.statusCode;
+        const data = lastDisconnect?.error?.data;
+        logger.info(`[PAIRING-DEBUG] ${account.phone} update: conn=${connection || 'n/a'} qr=${!!qr} statusCode=${sc ?? ''} lastErr=${lastDisconnect?.error?.message || ''} data=${data ? JSON.stringify(data) : ''}`);
+        if (connection === 'close') {
+          const closeReason = lastDisconnect?.error?.message || data?.reason || 'unknown';
+          logger.info(`[PAIRING] Socket closed for ${account.phone} via proxy: reason=${closeReason} status=${sc} data=${JSON.stringify(data)}`);
+          if (data && data.reason) logger.info(`[PAIRING] Close data reason: ${data.reason}`);
+          if (closeReason.includes('proxy') || closeReason.includes('NotAllowed') || closeReason.includes('Socks5')) {
+            logger.warn(`[PAIRING] Proxy-level rejection for WhatsApp on this handshake.`);
+          }
+        }
+      }
+
       if (connection === 'open') {
         logger.info(`Session OPEN for ${account.phone} (${account.id})`);
 
-        const wasPending = account.status === 'pending_verification' || account.status === 'pending_login';
+        const wasPending = ['pending_verification', 'pending_login', 'primary_registered'].includes(account.status);
         const isPhoneAssoc = account.acquisition_method === 'phone_assoc';
 
         const updatePatch = {
-          status: 'active',
+          status: 'linked',  // explicit linked stage after successful companion handshake
           last_linked_at: this.db.fn.now(),
           last_seen_at: this.db.fn.now(),
         };
@@ -143,6 +223,14 @@ export class SessionManager extends EventEmitter {
         // Port allocation on success only (user request for transitional phone-first flows)
         // If this was a cloud / SMS-acquired number that was created without a port,
         // allocate one now (first available normal port with capacity).
+        // Set display name from the linked session (comes from primary profile after successful link)
+        if (account.display_name == null) {
+          const user = sock.user || {};
+          if (user.name || user.verifiedName) {
+            updatePatch.display_name = user.name || user.verifiedName;
+          }
+        }
+
         if ((wasPending || isPhoneAssoc) && !account.port_id) {
           try {
             // Find a port with remaining capacity
@@ -176,6 +264,8 @@ export class SessionManager extends EventEmitter {
           .update(updatePatch);
 
         this.pairingInProgress.delete(account.id);
+        const rem = this._pairingReminders.get(account.id);
+        if (rem) { clearInterval(rem); this._pairingReminders.delete(account.id); }
         this.emit('connected', { accountId: account.id, phone: account.phone });
         this.reconnectDelays.delete(account.id);
       }
@@ -187,7 +277,7 @@ export class SessionManager extends EventEmitter {
 
         if (awaitingPairing) {
           logger.info(
-            `Pairing wait for ${account.phone}: ${reason} — enter the 8-digit code on the primary WhatsApp (Linked devices → Link a device). Retrying until linked or timeout.`
+            `Pairing wait for ${account.phone}: ${reason} — ENTER 8-DIGIT CODE NOW on primary WhatsApp. If you never got a push notification or code prompt on the phone, the server rejected Baileys' link request (see error logs above).`
           );
         } else {
           logger.warn(`Session CLOSED for ${account.phone}: ${reason} (reconnect=${shouldReconnect})`);
@@ -212,8 +302,10 @@ export class SessionManager extends EventEmitter {
 
             if (pinfo) {
               pinfo.reconnectAttempts = (pinfo.reconnectAttempts || 0) + 1;
-              if (pinfo.reconnectAttempts > 12) {
+              if (pinfo.reconnectAttempts > 20) {
                 this.pairingInProgress.delete(account.id);
+                const rem = this._pairingReminders.get(account.id);
+                if (rem) { clearInterval(rem); this._pairingReminders.delete(account.id); }
                 logger.error(
                   `Pairing abandoned for ${account.phone} after ${pinfo.reconnectAttempts} reconnects. ` +
                   'The code is likely invalid — wait 15 min, then request a fresh code (or use QR login).'
@@ -223,22 +315,44 @@ export class SessionManager extends EventEmitter {
             }
 
             // Baileys wiki: WA forcibly disconnects after companion_hello — restartRequired is normal.
+            // Use fast reconnects so a live socket is present when the user enters the code on the phone/emulator.
             if (statusCode === DisconnectReason.restartRequired) {
-              delay = 500;
+              delay = PAIRING_RESTART_RECONNECT_MS;
             } else if (reason.includes('Connection Terminated')) {
-              delay = 1500;
+              delay = 800;
             } else if (reason.includes('Connection Failure')) {
-              // Rapid 405 retries invalidate the code on the phone — back off aggressively.
-              delay = PAIRING_FAILURE_RECONNECT_MS;
+              const statusCode = lastDisconnect?.error?.output?.statusCode;
+              const failureData = lastDisconnect?.error?.data;
+              logger.error(
+                `PAIRING CONNECTION FAILURE for ${account.phone} (statusCode=${statusCode || 'unknown'}): ${JSON.stringify(failureData || {})}. ` +
+                `This usually means the server REJECTED the companion_hello / pairing request. ` +
+                `The 8-digit code was generated LOCALLY by Baileys and was NEVER registered with WhatsApp servers — that's why your phone gets no notification/prompt. ` +
+                `Official WhatsApp Web works because it presents a trusted client fingerprint.`
+              );
+              // Back off more on hard failures during pairing initiation
+              delay = Math.max(PAIRING_FAILURE_RECONNECT_MS, 8000);
             } else {
-              delay = 4000;
+              delay = 1500;
             }
           }
 
           setTimeout(() => {
             this.getOrCreateSocket(account.id).catch((e) =>
               logger.error(`Reconnect failed for ${account.phone}`, e)
-            );
+            ).then(() => {
+              // If we just had a hard Connection Failure while trying to pair,
+              // the previous code was never accepted by servers. Automatically
+              // request a fresh one (this will reset partial state and emit a new
+              // pairing_code + banner). This gives the operator a new chance
+              // without manual re-curl.
+              if (this.pairingInProgress.has(account.id) && reason.includes('Connection Failure')) {
+                setTimeout(() => {
+                  this.requestPairingCode(account.id, account.phone, { forceNew: true })
+                    .then(newCode => logger.info(`Auto-generated fresh pairing code after failure: ${newCode}`))
+                    .catch(err => logger.warn('Auto fresh pairing code attempt failed:', err.message));
+                }, 1200);
+              }
+            });
           }, delay);
         }
       }
@@ -259,28 +373,50 @@ export class SessionManager extends EventEmitter {
   }
 
   _buildNetworkAgents(proxyRow) {
-    if (proxyRow) return this._buildProxyConfig(proxyRow);
+    if (proxyRow) {
+      // Log clearly when a proxy is selected for a pairing attempt
+      if (this.pairingInProgress.size > 0 || !proxyRow) {
+        // will be logged in more detail in _createSocketForAccount for pairing
+      }
+      return this._buildProxyConfig(proxyRow);
+    }
+
+    // Log for pairing visibility when going direct
+    if (this.pairingInProgress.size > 0) {
+      logger.info('[PAIRING-TRANSPORT] Using DIRECT IPv4 connection (no proxy) for WhatsApp websocket');
+    }
 
     const agent = new https.Agent({ family: socketFamily, keepAlive: true });
     return { agent, fetchAgent: agent };
   }
 
   _buildProxyConfig(proxyRow) {
-    const { type, host, port, username, password_enc } = proxyRow;
-    const password = password_enc ? decrypt(password_enc) : undefined;
-    const auth = username ? `${username}:${password || ''}@` : '';
-    const proxyUrl = `${type}://${auth}${host}:${port}`;
+    const { id, type, host, port, username, password_enc } = proxyRow;
+    // Decrypt the stored password so the proxy agent can authenticate
+    let password;
+    if (password_enc) {
+      try { password = decrypt(password_enc); } catch (e) { /* ignore — will attempt without */ }
+    }
+    const auth = username ? `${encodeURIComponent(username)}:${encodeURIComponent(password || '')}@` : '';
+    // Use socks5h for remote DNS resolution (critical for many residential proxies to reach WA domains)
+    const proxyUrl = type === 'socks5'
+      ? `socks5h://${auth}${host}:${port}`
+      : `${type}://${auth}${host}:${port}`;
+
+    if (this.pairingInProgress.size > 0) {
+      logger.info(`[PAIRING-TRANSPORT] Using PROXY id=${id} for WhatsApp websocket: ${type}://${username ? username + ':***@' : ''}${host}:${port}`);
+    }
 
     try {
       if (type === 'socks5') {
         const agent = new SocksProxyAgent(proxyUrl);
-        return { agent, fetchAgent: agent }; // Baileys accepts both in different versions
+        return { agent, fetchAgent: agent };
       } else {
         const agent = new HttpsProxyAgent(proxyUrl);
         return { agent, fetchAgent: agent };
       }
     } catch (e) {
-      logger.error('Failed to create proxy agent', { proxyId: proxyRow.id, error: e.message });
+      logger.error('Failed to create proxy agent', { proxyId: id, error: e.message });
       return this._buildNetworkAgents(null);
     }
   }
@@ -366,7 +502,9 @@ export class SessionManager extends EventEmitter {
     const waiter = this._pairingReadyWaiters.get(accountId);
     if (!waiter) return;
 
-    if (update.qr || update.connection === 'connecting') {
+    // Resolve as soon as we have any sign of being in the pre-auth phase where
+    // requestPairingCode is safe to call. This matches Baileys guidance.
+    if (update.qr || update.connection === 'connecting' || update.connection === 'open') {
       clearTimeout(waiter.timeout);
       this._pairingReadyWaiters.delete(accountId);
       waiter.resolve();
@@ -392,7 +530,7 @@ export class SessionManager extends EventEmitter {
       const timeout = setTimeout(() => {
         this._pairingReadyWaiters.delete(accountId);
         reject(new Error(
-          'Timed out waiting for Baileys pairing phase. WhatsApp may be rate-limiting this number — wait 15 minutes or use QR login.'
+          'Timed out waiting for Baileys pairing phase. Try again or use QR login. (Common with rate limits or bad network/proxy)'
         ));
       }, timeoutMs);
 
@@ -413,10 +551,12 @@ export class SessionManager extends EventEmitter {
       clearTimeout(waiter.timeout);
       this._pairingReadyWaiters.delete(accountId);
     }
+    const rem = this._pairingReminders.get(accountId);
+    if (rem) { clearInterval(rem); this._pairingReminders.delete(accountId); }
 
     await this.db('ws_accounts')
       .where({ id: accountId })
-      .update({ baileys_auth_state: null, status: 'pending_verification' });
+      .update({ baileys_auth_state: null, status: 'primary_registered' }); // back to ready for fresh linking attempt
   }
 
   _getBackoff(accountId) {
@@ -434,9 +574,9 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * Request a pairing code for phone number association login (cloud/emulator friendly).
+   * Request a pairing code for phone number association login (supports phone primary or cloud emulator primary).
    * Instead of showing a QR to scan, this returns an 8-digit code that you enter
-   * directly in the WhatsApp app (running in your cloud emulator or on a phone).
+   * directly in the WhatsApp app (running on your phone as primary, or in cloud emulator).
    * This enables more automated / phone-less registration flows.
    *
    * Usage flow for cloud:
@@ -446,34 +586,117 @@ export class SessionManager extends EventEmitter {
    * 4. Enter the code in the WhatsApp app inside the emulator.
    * 5. Linking completes → auth state saved in DB → you can shut down the emulator.
    */
-  async requestPairingCode(accountId, phoneNumber, { forceNew = false } = {}) {
+  async requestPairingCode(accountId, phoneNumber, { forceNew = false, forceDirect = false } = {}) {
     const existing = this.pairingInProgress.get(accountId);
     if (!forceNew && existing && Date.now() - existing.startedAt < PAIRING_CODE_TTL_MS) {
       logger.info(`Reusing in-flight pairing code for ${phoneNumber}: ${existing.code}`);
       return existing.code;
     }
 
-    const account = await this.db('ws_accounts').where({ id: accountId }).first();
-    if (account?.baileys_auth_state) {
-      const { state } = await this._getAuthState(account);
-      if (state.creds?.registered) {
-        throw new Error('Account is already linked. Disconnect first if you want to re-link.');
-      }
-      // Partial pairing creds (me/pairingCode without registered) break reconnect — start clean.
-      if (forceNew || state.creds?.pairingCode || state.creds?.me) {
-        await this._resetPairingAuth(accountId);
-      }
-    } else if (forceNew) {
-      await this._resetPairingAuth(accountId);
+    let account = await this.db('ws_accounts').where({ id: accountId }).first();
+    if (forceDirect && account.proxy_id) {
+      // For testing: temporarily force no proxy for this linking attempt
+      await this.db('ws_accounts').where({ id: accountId }).update({ proxy_id: null });
+      account = await this.db('ws_accounts').where({ id: accountId }).first();
+      logger.info(`[PAIRING-TEST] forceDirect: cleared proxy for this attempt on ${phoneNumber}`);
     }
 
-    // Official Baileys flow: arm waiter first, then create socket, wait for QR/connecting, then request code.
-    const pairingReady = this._armPairingReadyWait(accountId);
-    const sock = await this.getOrCreateSocket(accountId);
-    await pairingReady;
-    await sock.waitForSocketOpen();
+    // Guard: Baileys links as a companion. The primary WhatsApp must be registered first.
+    // For the special test number we allow pure simulation (no real primary).
+    // NOTE: 'linking' is included because the sessions controller sets status='linking' BEFORE
+    // calling requestPairingCode (so the DB always shows 'linking' by the time we read it here).
+    const isTestNoPhone = account.phone === '+13185167435';
+    if (!isTestNoPhone && !['primary_registered', 'linking', 'linked', 'offline', 'error'].includes(account.status)) {
+      throw new Error(`Cannot request pairing: ${account.phone} is not primary_registered (status=${account.status}). If using phone as primary: register in WhatsApp on phone then --mark-registered. If emulator primary: complete registration first.`);
+    }
 
-    const code = await sock.requestPairingCode(phoneNumber.replace(/[^0-9]/g, ''));
+    logger.info(`[PAIRING] FRESH requestPairingCode for ${phoneNumber} (always clean state) — proxy=${account?.proxy_id || 'none'}`);
+    if (account?.proxy_id) {
+      logger.info(`[PAIRING] Proxy ID ${account.proxy_id} will be used for this Baileys connection`);
+    }
+    // Rocket-style: every single linking attempt must be a completely fresh "new device" handshake.
+    // We force a clean auth state (no previous me/pairingCode) and clear in-memory state.
+    await this._resetPairingAuth(accountId);
+
+    // Official Baileys flow: arm waiter first, then create socket, wait for QR/connecting, then request code.
+    // IMPORTANT: The early 'connecting' emit in Baileys is just a nextTick placeholder (before ws open + noise handshake).
+    // We must wait for real socket open + protocol progress before sending the link_code_companion_reg (companion_hello).
+    // Otherwise the server immediately closes with Connection Failure and the locally-generated code is never registered → phone gets zero notification.
+    const pairingReady = this._armPairingReadyWait(accountId);
+    let sock = await this.getOrCreateSocket(accountId);
+    logger.info(`[PAIRING] Socket created for ${phoneNumber} (via proxy), awaiting ready...`);
+
+    // Add timeout so the HTTP request to /connect doesn't hang forever when the proxy
+    // connection is slow or unsupported. This prevents "empty reply from server".
+    const SOCKET_READY_TIMEOUT_MS = 30000;
+    const timeoutErr = new Error(
+      `Timed out waiting for socket ready through proxy after ${SOCKET_READY_TIMEOUT_MS}ms. ` +
+      `Check if this specific proxy pool allows web.whatsapp.com (many "res-any" pools are blocked by WA). ` +
+      `Test: curl -v --socks5-hostname user:pass@host:port -I https://web.whatsapp.com`
+    );
+
+    try {
+      await Promise.race([
+        pairingReady,
+        new Promise((_, rej) => setTimeout(() => rej(timeoutErr), SOCKET_READY_TIMEOUT_MS))
+      ]);
+    } catch (e) {
+      if (e === timeoutErr) throw e;
+      logger.warn(`Pairing ready wait issue for ${phoneNumber}: ${e.message} — proceeding`);
+    }
+
+    logger.info(`[PAIRING] Ready event, awaiting socket open...`);
+    try {
+      await Promise.race([
+        sock.waitForSocketOpen(),
+        new Promise((_, rej) => setTimeout(() => rej(timeoutErr), SOCKET_READY_TIMEOUT_MS))
+      ]);
+      logger.info(`[PAIRING] Socket open succeeded for ${phoneNumber}`);
+    } catch (e) {
+      if (e === timeoutErr) throw e;
+      // Socket closed/errored before open — common when proxy is incompatible or IP is flagged.
+      // Don't retry blindly; surface the real error so the operator can change proxy.
+      const proxyHint = account.proxy_id
+        ? ` (proxy ${account.proxy_id} — try forceDirect:true or a different proxy)`
+        : ' (direct connection)';
+      logger.error(`[PAIRING] Socket failed to open for ${phoneNumber}${proxyHint}: ${e.message}`);
+      throw new Error(`Socket failed before pairing code could be requested: ${e.message}${proxyHint}`);
+    }
+
+    // Now wait for more handshake progress using Baileys' helper (or timeout).
+    // 'receivedPendingNotifications' or staying in 'connecting' without immediate failure is a decent signal.
+    console.log(`[PAIRING] Additional settle wait for ${phoneNumber}...`);
+    try {
+      await Promise.race([
+        Promise.race([
+          sock.waitForConnectionUpdate((u) => u.receivedPendingNotifications === true || u.connection === 'connecting', 10_000),
+          new Promise(r => setTimeout(r, 2500))
+        ]),
+        new Promise((_, rej) => setTimeout(() => rej(timeoutErr), SOCKET_READY_TIMEOUT_MS))
+      ]);
+    } catch (e) {
+      if (e === timeoutErr) throw e;
+    }
+
+    // Longer settle time after the real ws + initial protocol handshake. This is critical for the pairing IQ to be accepted.
+    await new Promise(r => setTimeout(r, 1200));
+
+    console.log(`[PAIRING] Calling Baileys requestPairingCode for ${phoneNumber}...`);
+    let code;
+    try {
+      const codeTimeout = new Error(`requestPairingCode timed out after 25s — socket may be open but WA not responding (proxy interference?)`);
+      code = await Promise.race([
+        sock.requestPairingCode(phoneNumber.replace(/[^0-9]/g, '')),
+        new Promise((_, rej) => setTimeout(() => rej(codeTimeout), 25000))
+      ]);
+    } catch (e) {
+      if (e.message && e.message.includes('proxy rejected')) {
+        throw new Error('The SOCKS5 proxy rejected the connection to WhatsApp. Try forceDirect:true or a different proxy.');
+      }
+      throw e;
+    }
+
+    logger.info(`[PAIRING] client-side code generated + companion_hello IQ sent for ${phoneNumber}. MACOS UA patch active. Proxy (if any) is logged above in [PAIRING] line.`);
 
     this.pairingInProgress.set(accountId, {
       phone: phoneNumber,
@@ -484,13 +707,87 @@ export class SessionManager extends EventEmitter {
 
     this.emit('pairing_code', { accountId, phone: phoneNumber, code });
 
-    logger.info(`Pairing code for ${phoneNumber}: ${code}`);
-    logger.info(
-      `Enter ${code} on the primary WhatsApp within ~60s: Linked devices → Link a device. ` +
-      'Do NOT re-run the script (that invalidates the code). Leave this process running.'
-    );
+    // Proxy status (if any) is logged in the [PAIRING] Creating socket line above
+    console.log(`[PAIRING] Proxy status for ${phoneNumber} is shown in the logs above (DIRECT or proxy=...). MACOS patch active.`);
+    this._showPairingCodeBanner(phoneNumber, code);
+
+    // Start / refresh a reminder interval so the code stays highly visible in server logs
+    // while testing via curl / scripts (user pastes into phone emulator).
+    this._startPairingReminder(accountId, phoneNumber, code);
 
     return code;
+  }
+
+  /**
+   * Print a loud, copy-paste friendly banner so the pairing code is impossible to miss
+   * when testing via curl / CLI (user requested visibility while testing).
+   */
+  _showPairingCodeBanner(phoneNumber, code) {
+    const border = '='.repeat(72);
+    const msg = [
+      '',
+      border,
+      '  WHATSAPP PAIRING CODE (client-generated) — PHONE MUST RECEIVE NOTIFICATION',
+      border,
+      `  Phone : ${phoneNumber}`,
+      `  CODE  : ${code}`,
+      '',
+      '  IMPORTANT: This 8-digit code is GENERATED LOCALLY by Baileys (bytesToCrockford).',
+      '  WhatsApp servers do NOT "return" the code to you. It only becomes valid if the',
+      '  companion_hello link request succeeds and WA registers a pending link for the phone.',
+      '',
+      '  On the PRIMARY phone (the actual WhatsApp app with this number logged in):',
+      '    • You should get a push notification or "new device link" prompt within seconds.',
+      '    • Then: Linked Devices → Link a Device → "Link with phone number instead"',
+      '    • Enter the code above.',
+      '',
+      '  If the phone gets ZERO notification/prompt even after 10s:',
+      '    → The server closed with Connection Failure before/during the hello send.',
+      '    → This local code will do nothing. Check the [PAIRING-DEBUG] + error logs.',
+      '    → MACOS UA patch is active. Proxy usage (or DIRECT) is logged clearly on server startup of the socket.',
+      '',
+      '  Keep the server running. A later fresh request may succeed after changes.',
+      border,
+      ''
+    ].join('\n');
+    console.log(msg);
+    logger.warn(`PAIRING: ${phoneNumber} → ${code}  (watch phone for notification NOW)`);
+  }
+
+  _startPairingReminder(accountId, phoneNumber, code) {
+    // Clear any prior for this account
+    const prev = this._pairingReminders.get(accountId);
+    if (prev) clearInterval(prev);
+
+    let ticks = 0;
+    const iv = setInterval(() => {
+      const still = this.pairingInProgress.get(accountId);
+      if (!still || still.code !== code) {
+        clearInterval(iv);
+        this._pairingReminders.delete(accountId);
+        return;
+      }
+      ticks++;
+      // Every ~8s echo a compact visible reminder (easy to spot in logs while testing)
+      if (ticks % 1 === 0) {
+        console.log(`[PAIRING CODE] ${phoneNumber} : ${code}   ← if phone never showed a link prompt, this code was rejected by server (no notification sent)`);
+        logger.info(`[REMINDER] Waiting for pairing code entry: ${code} for ${phoneNumber} (check if phone received link prompt)`);
+      }
+      // After ~90s still pending, warn about expiration
+      if (ticks > 11) {
+        logger.warn(`Pairing code ${code} for ${phoneNumber} is still pending after ~90s — it may be expiring.`);
+      }
+    }, 8000);
+
+    this._pairingReminders.set(accountId, iv);
+
+    // Auto cleanup if someone forgets (safety)
+    setTimeout(() => {
+      if (this._pairingReminders.get(accountId) === iv) {
+        clearInterval(iv);
+        this._pairingReminders.delete(accountId);
+      }
+    }, 180_000);
   }
 
   async disconnectAccount(accountId, permanent = false) {
@@ -587,12 +884,36 @@ export class SessionManager extends EventEmitter {
     return Array.from(activeSockets.keys());
   }
 
+  /**
+   * For testing / observability: return currently issued pairing codes that
+   * are still waiting to be entered on the phone. Very useful when using curl
+   * so you have a way to "see" the live codes without the frontend.
+   */
+  getPairingCodes() {
+    const out = [];
+    for (const [accountId, info] of this.pairingInProgress.entries()) {
+      // Best effort: include proxy info so it's visible via /pairing-codes even for curl users
+      // (we don't have the live account here, but caller in controller can enrich if wanted)
+      out.push({
+        accountId,
+        phone: info.phone,
+        code: info.code,
+        startedAt: info.startedAt,
+        ageSeconds: Math.floor((Date.now() - info.startedAt) / 1000),
+        reconnectAttempts: info.reconnectAttempts || 0,
+      });
+    }
+    return out;
+  }
+
   // Called on shutdown
   async shutdownAll() {
     for (const [id, entry] of activeSockets) {
       try { entry.sock?.end(); } catch {}
     }
     activeSockets.clear();
+    for (const iv of this._pairingReminders.values()) clearInterval(iv);
+    this._pairingReminders.clear();
   }
 }
 

@@ -1,9 +1,11 @@
 import EmulatorService from '../../cloud/emulator.service.js';
+import MoreLoginService from '../../cloud/morelogin.service.js';
 import { getProvider, listProviders } from '../../providers/numbers/index.js';
 import db from '../../db/connection.js';
 import { logger } from '../../utils/logger.js';
 
 const emulatorService = new EmulatorService();
+const moreloginService = new MoreLoginService();
 
 /**
  * Cloud / Emulator provisioning endpoints.
@@ -203,12 +205,27 @@ export async function acquireNumbers(req, res, next) {
           },
         });
 
+        // === CRITICAL FOR 10-MIN WINDOW ===
+        // Immediately start preparing a MoreLogin cloud phone in the background.
+        // Goal: WhatsApp running + the phone number already entered by the time the SMS code arrives.
+        (async () => {
+          try {
+            moreloginService.getFastReadyPhone({ phone: acquired.phone })
+              .then(({ moreloginId }) => moreloginService.enterPhoneNumberFast(moreloginId, acquired.phone))
+              .then(() => logger.info('[ACQUIRE] Fast MoreLogin phone prep + number entry started', { phone: acquired.phone }))
+              .catch(e => logger.warn('[ACQUIRE] Fast phone prep failed (will retry manually)', { phone: acquired.phone, error: e.message }));
+          } catch (e) {
+            logger.warn('[ACQUIRE] Could not kick off fast MoreLogin prep', { error: e.message });
+          }
+        })();
+
         results.push({
           phone: acquired.phone,
           orderId: acquired.orderId,
           emulatorId: emulator.id,
           status: emulator.status,
           alreadyRegistered: !!acquired.alreadyRegistered,
+          moreloginPrepStarted: true,
         });
       } catch (e) {
         logger.warn(`Failed to acquire number via ${provider}`, { error: e.message });
@@ -303,6 +320,32 @@ export async function markNumberRegistered(req, res, next) {
       },
     });
 
+    // For explicit stages + test number +13185167435 (full server simulation, no phones)
+    // Bootstrap primary_registered for this number to allow end-to-end linking tests without any phone.
+    if (emulator.phone === '+13185167435') {
+      let wsAcc = await db('ws_accounts').where({ phone: '+13185167435' }).first();
+      if (!wsAcc) {
+        await db('ws_accounts').insert({
+          phone: '+13185167435',
+          status: 'primary_registered',
+          acquisition_method: 'phone_assoc',
+          display_name: 'TEST-NO-PHONE',
+        });
+      } else {
+        await db('ws_accounts').where({ phone: '+13185167435' }).update({ status: 'primary_registered' });
+      }
+      logger.info('[TEST] Bootstrapped +13185167435 as primary_registered for full server no-phone tests');
+    } else if (emulator.phone) {
+      let wsAcc = await db('ws_accounts').where({ phone: emulator.phone }).first();
+      if (!wsAcc) {
+        await db('ws_accounts').insert({
+          phone: emulator.phone,
+          status: 'pending_verification',
+          acquisition_method: 'phone_assoc',
+        });
+      }
+    }
+
     res.json({
       data: updated,
       message: `Number ${emulator.phone} marked as registered. You can now run provision/link (port will be allocated only after successful Baileys connection).`,
@@ -372,5 +415,134 @@ export async function releaseNumber(req, res, next) {
     });
 
     res.json({ data: updated, message: `Released order ${orderId} for ${emulator.phone}` });
+  } catch (e) { next(e); }
+}
+
+// ============================================================
+// MORELOGIN CLOUD PHONE - NEW SEPARATE REGISTRATION SEQUENCE
+// ============================================================
+
+export async function listMoreLoginDevices(req, res, next) {
+  try {
+    const result = await moreloginService.client.listDevices(1, 50);
+    res.json({ data: result.data || result });
+  } catch (e) { next(e); }
+}
+
+export async function createCloudPhoneForReg(req, res, next) {
+  try {
+    const { phone, skuId, proxyId, envRemark } = req.body;
+    if (!phone) return res.status(400).json({ error: 'phone is required (the number we will register)' });
+
+    // 1. Ensure we have a cloud_emulator transitional record
+    let emulator = await moreloginService.getOrCreateEmulatorRecord({ phone, metadata: { skuId, source: 'morelogin-reg' } });
+
+    // 2. Do the heavy create + power + wait
+    const { emulator: updatedEmu, moreloginId } = await moreloginService.createAndPowerPhone({
+      phone,
+      skuId,
+      metadata: { proxyId, envRemark },
+    });
+
+    emulator = updatedEmu;
+
+    res.status(201).json({
+      data: {
+        emulator,
+        moreloginId,
+        next: 'Install WhatsApp then call /cloud/morelogin/register or use automation endpoints',
+      },
+      message: 'Cloud phone created and powered on via MoreLogin. Use the phone number + SMS code from supplier next.',
+    });
+  } catch (e) { next(e); }
+}
+
+export async function installWhatsAppOnPhone(req, res, next) {
+  try {
+    const { id } = req.params; // emulator id or morelogin numeric id
+    const emu = await moreloginService.getEmulator(id);
+    const mlId = emu?.morelogin_id || id;
+    if (!mlId) return res.status(400).json({ error: 'No morelogin id' });
+
+    const result = await moreloginService.installWhatsApp(mlId, req.body);
+    res.json({ data: result });
+  } catch (e) { next(e); }
+}
+
+export async function registerNumberOnCloudPhone(req, res, next) {
+  try {
+    const { phone, code, emulatorId } = req.body;
+    if (!phone || !code) return res.status(400).json({ error: 'phone and code (SMS from supplier) required' });
+
+    const result = await moreloginService.registerNumberOnCloud({ phone, code, emulatorId });
+    res.json({
+      data: result,
+      message: 'Registration attempted on MoreLogin cloud phone. Verify in WA. Then mark-registered + link.',
+    });
+  } catch (e) { next(e); }
+}
+
+export async function moreloginAction(req, res, next) {
+  // Generic low-level action surface for interactive registration debugging
+  // body: { moreloginId or emulatorId, action: 'click'|'input'|'exec'|'screenshot'|'powerOff', ...params }
+  try {
+    const { id } = req.params;
+    const { action, x, y, text, command, moreloginId: mlFromBody } = req.body;
+
+    const emu = await moreloginService.getEmulator(id);
+    const mlId = emu?.morelogin_id || mlFromBody || id;
+    if (!mlId) return res.status(400).json({ error: 'morelogin id required' });
+
+    let data;
+    if (action === 'click') data = await moreloginService.click(mlId, Number(x), Number(y));
+    else if (action === 'input') data = await moreloginService.inputText(mlId, String(text || ''));
+    else if (action === 'exec' || action === 'shell') data = await moreloginService.exec(mlId, command);
+    else if (action === 'screenshot') data = await moreloginService.screenshot(mlId);
+    else if (action === 'powerOff' || action === 'stop') data = await moreloginService.powerOff(mlId);
+    else if (action === 'startWa') data = await moreloginService.client.startApp(mlId, 'com.whatsapp');
+    else data = { error: 'unknown action' };
+
+    res.json({ data });
+  } catch (e) { next(e); }
+}
+
+export async function moreloginLink(req, res, next) {
+  try {
+    const { id } = req.params;
+    const result = await moreloginService.linkWithPairingCode(id);
+    res.json({ data: result });
+  } catch (e) { next(e); }
+}
+
+/**
+ * Ultra-fast path for the 10-minute supplier window.
+ * As soon as you have the phone number string, call this.
+ * It will grab (or create) a phone, launch WA, and type the number in.
+ * Then poll your SMS provider and call register again with the code, or use /action.
+ */
+export async function fastEnterPhoneOnCloud(req, res, next) {
+  try {
+    const { phone } = req.body;
+    if (!phone) return res.status(400).json({ error: 'phone is required' });
+
+    const prep = await moreloginService.getFastReadyPhone({ phone });
+    const enter = await moreloginService.enterPhoneNumberFast(prep.moreloginId, phone);
+
+    res.json({
+      data: {
+        moreloginId: prep.moreloginId,
+        emulator: prep.emulator,
+        ...enter
+      },
+      message: 'WhatsApp launched and phone number entered as fast as possible. Waiting for SMS code from supplier.'
+    });
+  } catch (e) { next(e); }
+}
+
+export async function moreloginPowerOff(req, res, next) {
+  try {
+    const { id } = req.params;
+    const result = await moreloginService.powerOff(id);
+    res.json({ data: result, message: 'Cloud phone powered off (billing should stop for this instance)' });
   } catch (e) { next(e); }
 }

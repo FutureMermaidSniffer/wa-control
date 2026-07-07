@@ -12,6 +12,11 @@
     "seed": "knex seed:run",
     "scrape-proxies": "node src/scripts/proxy-scraper.js",
     "provision-waydroid": "node src/scripts/provision-waydroid.js",
+    "test:morelogin": "node src/scripts/test-morelogin-client.js",
+    "test:morelogin-service": "node src/scripts/test-morelogin-service.js",
+    "clean-contacts": "node src/scripts/clean-non-usable-contacts.js",
+    "provision-morelogin": "node src/scripts/provision-morelogin.js",
+    "re-rocket": "node src/scripts/re-rocket.js",
     "test": "NODE_ENV=test node --test tests/*.test.js || echo 'Add jest or native tests'",
     "test:watch": "echo 'configure test watcher'",
     "lint": "echo 'add eslint later'"
