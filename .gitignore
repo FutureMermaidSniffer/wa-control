@@ -49,6 +49,9 @@ Desktop.ini
 .classpath
 .settings/
 
+# Large binaries (never commit — use external storage)
+*.apk
+
 # Misc
 .node_repl_history
 .eslintcache
