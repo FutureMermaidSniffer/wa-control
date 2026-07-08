@@ -1095,6 +1095,10 @@ export class SessionManager extends EventEmitter {
   }
 
   _startPairingReminder(accountId, phoneNumber, code) {
+    // Automated tests call _finalizePairingCodeExposure without entering a code;
+    // the 8s interval + 180s safety timer would keep node --test alive for ~3 minutes.
+    if (process.env.NODE_ENV === 'test') return;
+
     // Clear any prior for this account
     const prev = this._pairingReminders.get(accountId);
     if (prev) clearInterval(prev);

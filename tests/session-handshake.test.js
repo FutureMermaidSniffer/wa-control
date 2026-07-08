@@ -85,6 +85,12 @@ function createManager(db, { gate = false, weakMs = 50, waitMs = 200 } = {}) {
 function cleanupHandshake(mgr, accountId) {
   mgr._clearHandshakeWait(accountId);
   mgr._handshakePhase.delete(accountId);
+  mgr.pairingInProgress.delete(accountId);
+  const rem = mgr._pairingReminders?.get(accountId);
+  if (rem) {
+    clearInterval(rem);
+    mgr._pairingReminders.delete(accountId);
+  }
   activeSockets.delete(accountId);
 }
 

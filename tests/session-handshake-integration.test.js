@@ -223,6 +223,11 @@ function cleanupManager(mgr, accountId) {
   mgr._handshakePhase.delete(accountId);
   mgr._handshakeInFlight.delete(accountId);
   mgr.pairingInProgress.delete(accountId);
+  const rem = mgr._pairingReminders?.get(accountId);
+  if (rem) {
+    clearInterval(rem);
+    mgr._pairingReminders.delete(accountId);
+  }
   activeSockets.delete(accountId);
 }
 
