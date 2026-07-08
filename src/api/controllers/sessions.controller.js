@@ -1,4 +1,5 @@
 import SessionManager from '../../core/sessions/SessionManager.js';
+import { HandshakeRejectedError } from '../../core/sessions/errors.js';
 import db from '../../db/connection.js';
 import { logger } from '../../utils/logger.js';
 import portsData from '../../data/ports.data.js';
@@ -27,7 +28,8 @@ export async function listSessions(req, res) {
 export async function listPairingCodes(req, res) {
   // Lightweight visibility endpoint for testing.
   // Shows current codes + the proxy (if any) assigned to the account.
-  const codes = getSessionManager().getPairingCodes();
+  const includePending = req.query.includePending === 'true';
+  const codes = getSessionManager().getPairingCodes({ includePending });
   const enriched = await Promise.all(codes.map(async (c) => {
     const acc = await db('ws_accounts').where({ id: c.accountId }).first();
     let proxy = null;
@@ -171,18 +173,32 @@ export async function connectNumber(req, res, next) {
         // Explicit 'linking' stage for the handshake
         await db('ws_accounts').where({ id: account.id }).update({ status: 'linking' });
 
-        const code = await mgr.requestPairingCode(account.id, phone, { forceNew, forceDirect });
+        const result = await mgr.requestPairingCode(account.id, phone, { forceNew, forceDirect });
+        const normalized = typeof result === 'string'
+          ? { code: result, handshakeStatus: 'accepted', handshakeWaitMs: 0 }
+          : result;
 
         return res.json({
           accountId: account.id,
           phone: account.phone,
-          pairingCode: code,
+          pairingCode: normalized.code,
+          handshakeStatus: normalized.handshakeStatus,
+          handshakeWaitMs: normalized.handshakeWaitMs,
           status: 'enter_pairing_code',
           proxy: proxyInfo ? { id: proxyInfo.id, type: proxyInfo.type, host: proxyInfo.host, port: proxyInfo.port } : null,
           note: 'Proxy shown above (auto-selected if none passed). Watch server logs for the exact "[PAIRING] Creating Baileys socket ..." line.',
           instructions: 'Server prints big banner. Look for "USING PROXY" or "DIRECT". GET /pairing-codes for live view with proxy.'
         });
       } catch (e) {
+        if (e instanceof HandshakeRejectedError) {
+          return res.status(422).json({
+            error: e.message,
+            handshakeStatus: e.handshakeStatus,
+            reason: e.reason,
+            statusCode: e.statusCode,
+            hint: 'Primary device was not notified. Try forceDirect:true, a different proxy, or wait 15 minutes.',
+          });
+        }
         // Surface proxy-specific errors clearly
         if (e.message && (e.message.includes('proxy') || e.message.includes('NotAllowed') || e.message.includes('Socks5'))) {
           return res.status(400).json({ error: e.message });

@@ -381,7 +381,10 @@ export class SessionManager extends EventEmitter {
               if (this.pairingInProgress.has(account.id) && reason.includes('Connection Failure')) {
                 setTimeout(() => {
                   this.requestPairingCode(account.id, account.phone, { forceNew: true })
-                    .then(newCode => logger.info(`Auto-generated fresh pairing code after failure: ${newCode}`))
+                    .then((newCode) => {
+                      const code = typeof newCode === 'string' ? newCode : newCode.code;
+                      logger.info(`Auto-generated fresh pairing code after failure: ${code}`);
+                    })
                     .catch(err => logger.warn('Auto fresh pairing code attempt failed:', err.message));
                 }, 1200);
               }

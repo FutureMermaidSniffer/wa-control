@@ -151,6 +151,11 @@ sessionManager.on('qr', ({ accountId, phone, qr }) => {
   io.emit('wa:qr', { accountId, phone, qr });
 });
 
+// Handshake verification gate phases (pending / accepted / rejected)
+sessionManager.on('pairing_handshake', (payload) => {
+  io.emit('wa:pairing_handshake', payload);
+});
+
 // Support for phone-less / cloud emulator linking via pairing code
 sessionManager.on('pairing_code', ({ accountId, phone, code }) => {
   io.emit('wa:pairing_code', { accountId, phone, code });

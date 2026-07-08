@@ -26,7 +26,7 @@ if (!phone) {
   console.error('Usage:');
 console.error('  node src/scripts/provision-morelogin.js --phone +xxxxxxxx                 # fast: start WA + enter number (use when you just got the number)');
 console.error('  node src/scripts/provision-morelogin.js --phone +xxxxxxxx --code 123456   # full (enter code too)');
-console.error('  ... [--link] [--power-off]');
+console.error('  ... [--link] [--power-off]   # --link waits for Baileys open before --power-off');
   process.exit(1);
 }
 
@@ -46,10 +46,12 @@ const svc = new MoreLoginService();
   }
 
   if (doLink) {
-    console.log('\nRequesting Baileys pairing code (primary should now be registered on cloud phone)...');
-    const link = await svc.linkWithPairingCode(reg.emulator.id);
+    console.log('\nRequesting Baileys pairing code and waiting for link (primary should now be registered on cloud phone)...');
+    const link = await svc.linkAndWait(reg.emulator.id);
     console.log('PAIRING CODE:', link.pairingCode);
+    console.log('Handshake status:', link.handshakeStatus);
     console.log(link.instructions);
+    console.log('\n✓ Linked successfully! Baileys connection open.');
 
     if (doPowerOff) {
       console.log('\nPowering off cloud phone to stop billing...');

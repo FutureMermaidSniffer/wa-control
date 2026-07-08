@@ -12,6 +12,7 @@ import MoreLoginClient from './morelogin.client.js';
 import db from '../db/connection.js';
 import { logger } from '../utils/logger.js';
 import SessionManager from '../core/sessions/SessionManager.js';
+import { HandshakeRejectedError } from '../core/sessions/errors.js';
 
 const sessionManager = new SessionManager(db);
 
@@ -502,20 +503,75 @@ export class MoreLoginService {
 
     await this.updateEmulator(emulator.id, { status: 'linking' });
 
-    const code = await sessionManager.requestPairingCode(account.id, account.phone, { forceNew: true });
+    try {
+      const result = await sessionManager.requestPairingCode(account.id, account.phone, { forceNew: true });
+      const { code, handshakeStatus, handshakeWaitMs } = typeof result === 'string'
+        ? { code: result, handshakeStatus: 'accepted', handshakeWaitMs: 0 }
+        : result;
 
-    await this.updateEmulator(emulator.id, {
+      await this.updateEmulator(emulator.id, {
+        metadata: {
+          ...emulator.metadata,
+          pairing_code_used: code,
+          handshakeStatus,
+          handshakeWaitMs,
+        },
+      });
+
+      return {
+        success: true,
+        pairingCode: code,
+        handshakeStatus,
+        handshakeWaitMs,
+        accountId: account.id,
+        emulatorStatus: 'linking',
+        instructions: 'Enter the pairing code inside the WhatsApp app that is ALREADY REGISTERED on the MoreLogin cloud phone (Linked Devices → Link a device with phone number). Once linked you can power off the cloud phone.',
+      };
+    } catch (err) {
+      if (err instanceof HandshakeRejectedError) {
+        await this.updateEmulator(emulator.id, { status: 'error' });
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Keep the Baileys socket alive while the operator enters the pairing code on the cloud phone.
+   */
+  waitForLink(accountId, timeoutMs = 180000) {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        sessionManager.pairingInProgress.delete(accountId);
+        cleanup();
+        reject(new Error(
+          'Timed out waiting for Baileys link. Enter the pairing code on the primary WhatsApp faster, or re-run to get a fresh code.'
+        ));
+      }, timeoutMs);
+
+      const onConnected = ({ accountId: id }) => {
+        if (id === accountId) {
+          cleanup();
+          resolve();
+        }
+      };
+
+      const cleanup = () => {
+        clearTimeout(timeout);
+        sessionManager.off('connected', onConnected);
+      };
+
+      sessionManager.on('connected', onConnected);
+    });
+  }
+
+  async linkAndWait(emulatorId, timeoutMs = 180000) {
+    const link = await this.linkWithPairingCode(emulatorId);
+    await this.waitForLink(link.accountId, timeoutMs);
+    await this.updateEmulator(emulatorId, {
       status: 'linked',
       last_linked_at: db.fn.now(),
-      metadata: { ...emulator.metadata, pairing_code_used: code },
     });
-
-    return {
-      success: true,
-      pairingCode: code,
-      accountId: account.id,
-      instructions: 'Enter the pairing code inside the WhatsApp app that is ALREADY REGISTERED on the MoreLogin cloud phone (Linked Devices → Link a device with phone number). Once linked you can power off the cloud phone.',
-    };
+    return { ...link, emulatorStatus: 'linked' };
   }
 
   // Convenience full separate sequence helper

@@ -298,25 +298,30 @@ export class EmulatorService {
     }
 
     try {
-      const code = await sessionManager.requestPairingCode(account.id, account.phone, {
+      const result = await sessionManager.requestPairingCode(account.id, account.phone, {
         forceNew: emulator.status === 'error',
       });
+      const { code, handshakeStatus, handshakeWaitMs } = typeof result === 'string'
+        ? { code: result, handshakeStatus: 'accepted', handshakeWaitMs: 0 }
+        : result;
 
       await this.updateEmulator(emulatorId, {
-        status: 'linked',
-        last_linked_at: db.fn.now(),
         metadata: {
           ...emulator.metadata,
           pairing_code_used: code,
-          linked_at: new Date().toISOString(),
+          handshakeStatus,
+          handshakeWaitMs,
         },
       });
 
-      logger.info('Pairing code issued for cloud emulator', { emulatorId, code });
+      logger.info('Pairing code issued for cloud emulator', { emulatorId, code, handshakeStatus });
 
       return {
         success: true,
         pairingCode: code,
+        handshakeStatus,
+        handshakeWaitMs,
+        emulatorStatus: 'linking',
         instructions: 'Enter this code in the WhatsApp app running inside the Waydroid session. Server logs will show huge banner + live reminders of the code. GET /sessions/pairing-codes for visibility. Once linked you can stop the session. Port allocated on open.',
         accountId: account.id,
       };

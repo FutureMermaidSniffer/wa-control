@@ -1,5 +1,6 @@
 import EmulatorService from '../../cloud/emulator.service.js';
 import MoreLoginService from '../../cloud/morelogin.service.js';
+import { HandshakeRejectedError } from '../../core/sessions/errors.js';
 import { getProvider, listProviders } from '../../providers/numbers/index.js';
 import db from '../../db/connection.js';
 import { logger } from '../../utils/logger.js';
@@ -107,7 +108,18 @@ export async function linkEmulator(req, res, next) {
   try {
     const result = await emulatorService.linkWithPairingCode(req.params.id);
     res.json({ data: result });
-  } catch (e) { next(e); }
+  } catch (e) {
+    if (e instanceof HandshakeRejectedError) {
+      return res.status(422).json({
+        error: e.message,
+        handshakeStatus: e.handshakeStatus,
+        reason: e.reason,
+        statusCode: e.statusCode,
+        hint: 'Primary device was not notified. Try a different proxy or forceDirect.',
+      });
+    }
+    next(e);
+  }
 }
 
 export async function shutdownEmulator(req, res, next) {
@@ -511,7 +523,18 @@ export async function moreloginLink(req, res, next) {
     const { id } = req.params;
     const result = await moreloginService.linkWithPairingCode(id);
     res.json({ data: result });
-  } catch (e) { next(e); }
+  } catch (e) {
+    if (e instanceof HandshakeRejectedError) {
+      return res.status(422).json({
+        error: e.message,
+        handshakeStatus: e.handshakeStatus,
+        reason: e.reason,
+        statusCode: e.statusCode,
+        hint: 'Primary device was not notified. Try a different proxy or forceDirect.',
+      });
+    }
+    next(e);
+  }
 }
 
 /**
