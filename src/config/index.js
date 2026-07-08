@@ -41,6 +41,11 @@ const envSchema = z.object({
   MORELOGIN_LOCAL_API: z.string().url().default('http://127.0.0.1:40000'),
   MORELOGIN_DEFAULT_SKU_ID: z.string().default('10004'),
   MORELOGIN_MODE: z.enum(['open', 'local']).default('open'),
+
+  // Pairing handshake verification gate (opt-in; default off = legacy behavior)
+  PAIRING_HANDSHAKE_GATE: z.enum(['0', '1']).default('0'),
+  HANDSHAKE_WAIT_MS: z.coerce.number().default(18000),
+  HANDSHAKE_WEAK_ACCEPT_MS: z.coerce.number().default(12000),
 });
 
 let config;
