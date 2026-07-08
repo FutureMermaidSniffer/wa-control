@@ -89,6 +89,19 @@ const PAIRING_FAILURE_RECONNECT_MS = 6_000;
 /** For restartRequired (common after companion_hello and pair-success), reconnect fast to keep the link window alive. */
 const PAIRING_RESTART_RECONNECT_MS = 250;
 
+/** Enforce HANDSHAKE_WAIT_MS >= HANDSHAKE_WEAK_ACCEPT_MS (clamp when misconfigured). */
+export function resolveHandshakeTimerMs(waitMs, weakMs) {
+  let handshakeWaitMs = waitMs;
+  const handshakeWeakAcceptMs = weakMs;
+  if (handshakeWaitMs < handshakeWeakAcceptMs) {
+    logger.warn(
+      `HANDSHAKE_WAIT_MS (${handshakeWaitMs}) < HANDSHAKE_WEAK_ACCEPT_MS (${handshakeWeakAcceptMs}); clamping`
+    );
+    handshakeWaitMs = handshakeWeakAcceptMs + 3000;
+  }
+  return { handshakeWaitMs, handshakeWeakAcceptMs };
+}
+
 export class SessionManager extends EventEmitter {
   constructor(db) {
     super();
@@ -103,16 +116,9 @@ export class SessionManager extends EventEmitter {
 
     this.handshakeGateEnabled = config.PAIRING_HANDSHAKE_GATE === '1';
 
-    let handshakeWaitMs = config.HANDSHAKE_WAIT_MS;
-    const handshakeWeakAcceptMs = config.HANDSHAKE_WEAK_ACCEPT_MS;
-    if (handshakeWaitMs < handshakeWeakAcceptMs) {
-      logger.warn(
-        `HANDSHAKE_WAIT_MS (${handshakeWaitMs}) < HANDSHAKE_WEAK_ACCEPT_MS (${handshakeWeakAcceptMs}); clamping`
-      );
-      handshakeWaitMs = handshakeWeakAcceptMs + 3000;
-    }
-    this.HANDSHAKE_WAIT_MS = handshakeWaitMs;
-    this.HANDSHAKE_WEAK_ACCEPT_MS = handshakeWeakAcceptMs;
+    const timers = resolveHandshakeTimerMs(config.HANDSHAKE_WAIT_MS, config.HANDSHAKE_WEAK_ACCEPT_MS);
+    this.HANDSHAKE_WAIT_MS = timers.handshakeWaitMs;
+    this.HANDSHAKE_WEAK_ACCEPT_MS = timers.handshakeWeakAcceptMs;
 
     /** @type {Map<string, { resolve, reject, timeout, weakTimer, startedAt, phone }>} */
     this._handshakeWaiters = new Map();
@@ -584,9 +590,12 @@ export class SessionManager extends EventEmitter {
     this._clearHandshakeWait(accountId);
     this._handshakePhase.delete(accountId);
 
-    await this.db('ws_accounts')
-      .where({ id: accountId })
-      .update({ baileys_auth_state: null, status: 'primary_registered' }); // back to ready for fresh linking attempt
+    const patch = { baileys_auth_state: null };
+    // Gated path: controller already set linking; do not downgrade while handshake is in flight.
+    if (!this._handshakeInFlight.has(accountId)) {
+      patch.status = 'primary_registered';
+    }
+    await this.db('ws_accounts').where({ id: accountId }).update(patch);
   }
 
   _isHandshakePhaseActive(accountId) {
@@ -663,9 +672,14 @@ export class SessionManager extends EventEmitter {
         weakTimer = setTimeout(() => {
           const entry = activeSockets.get(accountId);
           if (entry?.sock?.ws?.isOpen && this._handshakeWaiters.has(accountId)) {
-            this._resolveHandshakeWait(accountId, null, {
+            void this._resolveHandshakeWait(accountId, null, {
               status: 'accepted_weak',
               reason: 'socket_open_at_weak_deadline',
+            }).catch((err) => {
+              logger.warn('[PAIRING-HANDSHAKE] weak accept resolve failed', {
+                accountId,
+                err: err.message,
+              });
             });
           }
         }, this.HANDSHAKE_WEAK_ACCEPT_MS);
@@ -760,6 +774,14 @@ export class SessionManager extends EventEmitter {
           startedAt,
         });
         this._clearHandshakeWait(accountId, { emitRejected: true });
+        this._logHandshake({
+          accountId,
+          phone,
+          event: 'rejected',
+          statusCode,
+          reason: 'loggedOut',
+          handshakeWaitMs: Date.now() - startedAt,
+        });
         await this._revertLinkingStatus(accountId);
         reject(error);
         return;
@@ -859,14 +881,18 @@ export class SessionManager extends EventEmitter {
 
     try {
       await this._resetPairingAuth(accountId);
-      const code = await this._requestPairingCodeCore(accountId, phoneNumber, { forceDirect });
+      const { sock } = await this._preparePairingSocketForCode(accountId, phoneNumber, { forceDirect });
 
       this.emit('pairing_handshake', { accountId, phone: phoneNumber, status: 'pending' });
+      const handshakePromise = this._armHandshakeWait(accountId, phoneNumber);
 
+      let code;
       let handshakeResult;
       try {
-        handshakeResult = await this._armHandshakeWait(accountId, phoneNumber);
+        code = await this._requestPairingCodeFromSocket(sock, phoneNumber);
+        handshakeResult = await handshakePromise;
       } catch (err) {
+        this._clearHandshakeWait(accountId);
         throw err;
       }
 
@@ -882,6 +908,11 @@ export class SessionManager extends EventEmitter {
   }
 
   async _requestPairingCodeCore(accountId, phoneNumber, { forceDirect = false } = {}) {
+    const { sock } = await this._preparePairingSocketForCode(accountId, phoneNumber, { forceDirect });
+    return this._requestPairingCodeFromSocket(sock, phoneNumber);
+  }
+
+  async _preparePairingSocketForCode(accountId, phoneNumber, { forceDirect = false } = {}) {
     let account = await this.db('ws_accounts').where({ id: accountId }).first();
     if (forceDirect && account.proxy_id) {
       await this.db('ws_accounts').where({ id: accountId }).update({ proxy_id: null });
@@ -954,6 +985,10 @@ export class SessionManager extends EventEmitter {
 
     await new Promise((r) => setTimeout(r, 1200));
 
+    return { sock, account };
+  }
+
+  async _requestPairingCodeFromSocket(sock, phoneNumber) {
     console.log(`[PAIRING] Calling Baileys requestPairingCode for ${phoneNumber}...`);
     let code;
     try {

@@ -50,6 +50,8 @@ function createMockDb(initialStatus = 'linking') {
   return db;
 }
 
+// Stub mirroring connection.update close-branch guard logic (not the real handler).
+// PR4 integration tests will exercise the full sock.ev.on('connection.update') path.
 async function simulateCloseOfflineGuard(mgr, accountId, shouldReconnect = true) {
   const awaitingPairing = mgr.pairingInProgress.has(accountId);
   const handshakePhaseActive = mgr._isHandshakePhaseActive(accountId);
@@ -65,8 +67,10 @@ let activeSockets;
 let HandshakeRejectedError;
 let InFlightHandshakeError;
 
+let resolveHandshakeTimerMs;
+
 before(async () => {
-  ({ SessionManager, activeSockets } = await import('../src/core/sessions/SessionManager.js'));
+  ({ SessionManager, activeSockets, resolveHandshakeTimerMs } = await import('../src/core/sessions/SessionManager.js'));
   ({ HandshakeRejectedError, InFlightHandshakeError } = await import('../src/core/sessions/errors.js'));
 });
 
@@ -101,6 +105,81 @@ describe('SessionManager handshake gate', () => {
 
     assert.equal(mgr._handshakeInFlight.get('acc-1'), inflight);
     mgr._handshakeInFlight.delete('acc-1');
+  });
+
+  test('_resetPairingAuth preserves linking status when handshake in flight', async () => {
+    const db = createMockDb('linking');
+    const mgr = createManager(db, { gate: true });
+    mgr._handshakeInFlight.set('acc-linking', new Promise(() => {}));
+
+    await mgr._resetPairingAuth('acc-linking');
+
+    assert.equal(db._getStatus(), 'linking');
+    const authReset = db._updates.find((u) => u.patch.baileys_auth_state === null);
+    assert.ok(authReset);
+    assert.equal(authReset.patch.status, undefined);
+    mgr._handshakeInFlight.delete('acc-linking');
+  });
+
+  test('_resetPairingAuth reverts to primary_registered when not in flight', async () => {
+    const db = createMockDb('linking');
+    const mgr = createManager(db);
+
+    await mgr._resetPairingAuth('acc-legacy');
+
+    assert.equal(db._getStatus(), 'primary_registered');
+  });
+
+  test('resolveHandshakeTimerMs clamps WAIT below WEAK', () => {
+    const timers = resolveHandshakeTimerMs(5000, 12000);
+    assert.equal(timers.handshakeWaitMs, 15000);
+    assert.equal(timers.handshakeWeakAcceptMs, 12000);
+    assert.ok(timers.handshakeWaitMs >= timers.handshakeWeakAcceptMs);
+  });
+
+  test('gated path arms handshake waiter before requestPairingCode', async () => {
+    const db = createMockDb('linking');
+    const mgr = createManager(db, { gate: true });
+    const accountId = 'acc-gated-order';
+    const order = [];
+
+    mgr._resetPairingAuth = async () => {
+      order.push('reset');
+    };
+    mgr._preparePairingSocketForCode = async () => {
+      order.push('prepare');
+      return { sock: { requestPairingCode: async () => 'CODE1234' } };
+    };
+    mgr._armHandshakeWait = (...args) => {
+      order.push('arm');
+      return Promise.resolve({ status: 'accepted', handshakeWaitMs: 5, reason: 'restartRequired' });
+    };
+    mgr._requestPairingCodeFromSocket = async () => {
+      order.push('requestCode');
+      return 'CODE1234';
+    };
+    mgr._showPairingCodeBanner = () => {};
+    mgr._startPairingReminder = () => {};
+
+    const result = await mgr.requestPairingCode(accountId, '+15551234567');
+    assert.deepEqual(order, ['reset', 'prepare', 'arm', 'requestCode']);
+    assert.equal(result.code, 'CODE1234');
+    assert.equal(result.handshakeStatus, 'accepted');
+    mgr.pairingInProgress.delete(accountId);
+  });
+
+  test('fast post-hello close captured when waiter armed before companion_hello', async () => {
+    const db = createMockDb('linking');
+    const mgr = createManager(db, { gate: true, waitMs: 5000, weakMs: 4000 });
+    const accountId = 'acc-fast-close';
+
+    const handshakePromise = mgr._armHandshakeWait(accountId, '+15551234567');
+    await mgr._resolveHandshakeWait(accountId, restartRequiredClose());
+
+    const result = await handshakePromise;
+    assert.equal(result.status, 'accepted');
+    assert.equal(mgr._handshakeWaiters.has(accountId), false);
+    cleanupHandshake(mgr, accountId);
   });
 
   test('overlapping gated calls throw InFlightHandshakeError without clearing first inflight', async () => {
