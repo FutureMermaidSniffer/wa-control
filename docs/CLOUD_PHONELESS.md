@@ -92,8 +92,31 @@ The response will look like:
   "accountId": "...",
   "phone": "+15551234567",
   "pairingCode": "12345678",
+  "handshakeStatus": "accepted",
+  "handshakeWaitMs": 4200,
   "status": "enter_pairing_code",
+  "proxy": { "id": "...", "type": "socks5", "host": "proxy.example.com", "port": 9595 },
   "instructions": "Enter this 8-digit code in the WhatsApp app (running in your cloud emulator) to link the session without scanning a QR."
+}
+```
+
+When `PAIRING_HANDSHAKE_GATE=1` (recommended for production), the API waits for WhatsApp to accept the `companion_hello` before returning the code. Possible `handshakeStatus` values:
+
+| Value | Meaning |
+|-------|---------|
+| `accepted` | WA sent `restartRequired` — primary device should show link prompt |
+| `accepted_weak` | Socket stayed open but no decisive signal — code shown with warning |
+| `rejected` / `ambiguous` | Returned as **HTTP 422** (no `pairingCode`) |
+
+Example 422 rejection:
+
+```json
+{
+  "error": "Pairing handshake rejected: Connection Failure",
+  "handshakeStatus": "rejected",
+  "reason": "Connection Failure",
+  "statusCode": 405,
+  "hint": "Primary device was not notified. Try forceDirect:true, a different proxy, or wait 15 minutes."
 }
 ```
 

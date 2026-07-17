@@ -148,6 +148,85 @@ Even with perfect logging and the MACOS UA patch, if the proxy says "NotAllowed"
 
 ---
 
+## 7. Handshake gate (`PAIRING_HANDSHAKE_GATE=1`)
+
+**Symptom**
+- UI shows Phase 1 → Phase 2, then either a code (with `Handshake OK` or `Weak accept` badge) or a rejection panel.
+- Curl/UI hangs up to ~48s before returning (30s socket open + up to 18s handshake wait).
+
+**What it does**
+- With the gate enabled, Baileys still generates the pairing code locally, but the API **does not return it** until WhatsApp accepts (or weak-accepts) the `companion_hello` IQ.
+- The supervisor UI listens for Socket.io `wa:pairing_handshake` events for live phase updates:
+  - `pending` → Phase 2 (“Verifying WhatsApp accepted link request…”)
+  - `accepted` / `accepted_weak` → code shown
+  - `rejected` / `ambiguous` → HTTP 422
+
+**Enable**
+```bash
+# .env
+PAIRING_HANDSHAKE_GATE=1
+```
+
+**Statuses**
+| `handshakeStatus` | Phone notified? | API |
+|-------------------|-------------------|-----|
+| `accepted` | Yes (restartRequired) | 200 + `pairingCode` |
+| `accepted_weak` | Maybe | 200 + `pairingCode` + weak badge |
+| `rejected` | No | 422 |
+| `ambiguous` | Unknown (timeout) | 422 |
+
+---
+
+## 8. HTTP 422 pairing responses
+
+**When you see 422**
+- The Baileys socket connected (or attempted to), but the handshake gate did not get a trusted accept signal.
+- **Do not** paste a code from logs or an old response — no pending link was created server-side.
+
+**Typical body**
+```json
+{
+  "error": "Pairing handshake rejected: Connection Failure",
+  "handshakeStatus": "rejected",
+  "reason": "Connection Failure",
+  "statusCode": 405,
+  "hint": "Primary device was not notified. Try forceDirect:true, a different proxy, or wait 15 minutes."
+}
+```
+
+**Fixes**
+1. `forceDirect: true` on `/sessions/connect` (skips proxy for this attempt only).
+2. Different residential proxy pool (see §2 SOCKS5 NotAllowed).
+3. Wait 15+ minutes if rate-limited; do not spam `/connect`.
+4. Confirm primary WhatsApp is fully registered and on a recent APK.
+
+The UI maps 422 to the **Phase 3 rejection panel** with `reason`, `statusCode`, and `hint`.
+
+---
+
+## 9. Reverse proxy / nginx timeouts (≥ 120s)
+
+**Symptom**
+- Pairing works via `curl http://localhost:3000/...` but fails through nginx/Caddy with `502`, `504`, or empty response mid-request.
+- Browser pairing modal resets or shows “Network error” while server logs show a successful code.
+
+**Root cause**
+- `/api/v1/sessions/connect` with `usePairingCode: true` and handshake gate can take **up to ~48s** (30s socket ready + 18s handshake). Proxies in front of the app often default to **60s** read timeout.
+
+**Fix (nginx example)**
+```nginx
+location /api/ {
+  proxy_pass http://127.0.0.1:3000;
+  proxy_read_timeout 120s;
+  proxy_connect_timeout 120s;
+  proxy_send_timeout 120s;
+}
+```
+
+Use **≥ 120s** for any path that triggers pairing (`/sessions/connect`, `/cloud/emulators/provision`, `/cloud/emulators/:id/link`, MoreLogin link endpoints).
+
+---
+
 ## Summary – What actually worked / didn't work
 
 | Proxy Type | Port | Result                              | Reason                              |
@@ -196,6 +275,9 @@ node -e '
 - Auto-assignment of proxy for pairing flows when none specified.
 - Import endpoint returns `skippedIds` so you can still obtain the ID.
 - Clearer error messages when a proxy explicitly rejects the connection.
+- **Handshake gate** (`PAIRING_HANDSHAKE_GATE=1`): codes exposed only after WA accept/weak-accept; rejections return HTTP 422.
+- **Supervisor UI**: pairing modal phases (socket open → handshake verify → code or rejection); all pairing fetch paths check `res.ok`.
+- Socket.io `wa:pairing_handshake` for live phase updates during connect.
 
 
 Correct sequence (recommended for testing with scrcpy):
