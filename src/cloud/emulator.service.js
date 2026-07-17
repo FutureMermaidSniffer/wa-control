@@ -11,12 +11,10 @@
 import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
 import db from '../db/connection.js';
-import SessionManager from '../core/sessions/SessionManager.js';
+import { getSessionEngine } from '../core/engine/SessionEngine.js';
 import { logger } from '../utils/logger.js';
 
 const execAsync = promisify(exec);
-
-const sessionManager = new SessionManager(db);
 
 export class EmulatorService {
   constructor() {
@@ -298,7 +296,7 @@ export class EmulatorService {
     }
 
     try {
-      const code = await sessionManager.requestPairingCode(account.id, account.phone, {
+      const code = await getSessionEngine().requestPairingCode(account.id, account.phone, {
         forceNew: emulator.status === 'error',
       });
 
@@ -447,9 +445,10 @@ export class EmulatorService {
    * Keep the Baileys socket alive while the operator enters the pairing code in WhatsApp.
    */
   waitForLink(accountId, timeoutMs = 180000) {
+    const engine = getSessionEngine();
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
-        sessionManager.pairingInProgress.delete(accountId);
+        engine.manager?.pairingInProgress?.delete?.(accountId);
         cleanup();
         reject(new Error(
           'Timed out waiting for Baileys link. Enter the pairing code on the primary WhatsApp faster, or re-run to get a fresh code.'
@@ -465,10 +464,10 @@ export class EmulatorService {
 
       const cleanup = () => {
         clearTimeout(timeout);
-        sessionManager.off('connected', onConnected);
+        engine.off('connected', onConnected);
       };
 
-      sessionManager.on('connected', onConnected);
+      engine.on('connected', onConnected);
     });
   }
 }

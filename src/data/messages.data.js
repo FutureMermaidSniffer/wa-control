@@ -10,11 +10,17 @@ export async function findOrCreateConversation(wsAccountId, contactPhone, contac
       .insert({
         ws_account_id: wsAccountId,
         contact_phone: contactPhone,
-        contact_name: contactName,
+        contact_name: contactName || null,
         last_message_at: db.fn.now(),
       })
       .returning('*');
     convo = created;
+  } else if (contactName && contactName !== convo.contact_name) {
+    // Fill or refresh display name from WA pushName (no 3rd-party API)
+    await db('conversations')
+      .where({ id: convo.id })
+      .update({ contact_name: contactName, updated_at: db.fn.now() });
+    convo.contact_name = contactName;
   }
   return convo;
 }
@@ -29,14 +35,38 @@ export async function updateConversationLastMessage(convoId, timestamp = null) {
 }
 
 export async function listConversationsForAccount(wsAccountId, filters = {}) {
-  let q = db('conversations')
-    .where({ ws_account_id: wsAccountId })
-    .orderBy('last_message_at', 'desc');
+  // Lateral-style last message for WhatsApp-like snippets
+  const limit = filters.limit || 100;
+  let q = db('conversations as c')
+    .where({ 'c.ws_account_id': wsAccountId })
+    .select(
+      'c.*',
+      db.raw(`(
+        SELECT m.text FROM messages m
+        WHERE m.conversation_id = c.id
+        ORDER BY m.timestamp DESC NULLS LAST, m.created_at DESC
+        LIMIT 1
+      ) as last_message_text`),
+      db.raw(`(
+        SELECT m.direction FROM messages m
+        WHERE m.conversation_id = c.id
+        ORDER BY m.timestamp DESC NULLS LAST, m.created_at DESC
+        LIMIT 1
+      ) as last_message_direction`),
+      db.raw(`(c.contact_phone LIKE '%@g.us') as is_group`)
+    )
+    .orderBy('c.last_message_at', 'desc');
 
-  if (filters.unread) q = q.where('unread_count', '>', 0);
-  if (filters.pinned !== undefined) q = q.where({ pinned: filters.pinned });
+  if (filters.unread) q = q.where('c.unread_count', '>', 0);
+  if (filters.pinned !== undefined) q = q.where({ 'c.pinned': filters.pinned });
 
-  return q.limit(filters.limit || 100);
+  const rows = await q.limit(limit);
+  // Normalize is_group for PG boolean / string
+  return rows.map((r) => ({
+    ...r,
+    is_group: r.is_group === true || r.is_group === 't' || r.is_group === 1
+      || String(r.contact_phone || '').includes('@g.us'),
+  }));
 }
 
 export async function getConversation(id) {

@@ -11,9 +11,7 @@
 import MoreLoginClient from './morelogin.client.js';
 import db from '../db/connection.js';
 import { logger } from '../utils/logger.js';
-import SessionManager from '../core/sessions/SessionManager.js';
-
-const sessionManager = new SessionManager(db);
+import { getSessionEngine } from '../core/engine/SessionEngine.js';
 
 const client = new MoreLoginClient();
 
@@ -310,7 +308,8 @@ export class MoreLoginService {
    * Goal: < 60-90s from having a ready device to "enter code" prompt.
    */
   async enterPhoneNumberFast(moreloginId, phone) {
-    const clean = phone.replace(/^\+/, '');      // 18103831775
+    // Digits only (strip +, spaces, dashes) — same as Baileys pairing
+    const clean = String(phone || '').replace(/\D/g, '');
     const local = clean.replace(/^1/, '');       // 8103831775 (US)
 
     logger.info('[FAST] Entering phone number on ML device', { moreloginId, phone });
@@ -502,7 +501,7 @@ export class MoreLoginService {
 
     await this.updateEmulator(emulator.id, { status: 'linking' });
 
-    const code = await sessionManager.requestPairingCode(account.id, account.phone, { forceNew: true });
+    const code = await getSessionEngine().requestPairingCode(account.id, account.phone, { forceNew: true });
 
     await this.updateEmulator(emulator.id, {
       status: 'linked',

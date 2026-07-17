@@ -1,8 +1,17 @@
 import db from '../db/connection.js';
+import { normalizeWaPhone } from '../utils/phone.js';
 
 export async function createAccount(data) {
+  const payload = { ...data };
+  if (payload.phone) {
+    try {
+      payload.phone = normalizeWaPhone(payload.phone);
+    } catch {
+      payload.phone = String(payload.phone).replace(/\D/g, '');
+    }
+  }
   const [row] = await db('ws_accounts')
-    .insert(data)
+    .insert(payload)
     .returning('*');
   return row;
 }
@@ -12,7 +21,19 @@ export async function findById(id) {
 }
 
 export async function findByPhone(phone) {
-  return db('ws_accounts').where({ phone }).first();
+  if (!phone) return null;
+  let digits;
+  try {
+    digits = normalizeWaPhone(phone, { throwOnInvalid: false, requireCountry: false });
+  } catch {
+    digits = String(phone).replace(/\D/g, '');
+  }
+  // Match digits-only or legacy +prefix storage
+  return db('ws_accounts')
+    .where({ phone: digits })
+    .orWhere({ phone: `+${digits}` })
+    .orWhere({ phone })
+    .first();
 }
 
 export async function list(filters = {}) {

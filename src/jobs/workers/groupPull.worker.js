@@ -7,10 +7,13 @@ import { Worker } from 'bullmq';
 import { getConnection, scheduleGroupPullJob } from '../queues.js';
 import db from '../../db/connection.js';
 import groupPullsData from '../../data/groupPulls.data.js';
-import SessionManager from '../../core/sessions/SessionManager.js';
+import { getSessionEngine } from '../../core/engine/SessionEngine.js';
 import { logger } from '../../utils/logger.js';
 
-const sessionManager = new SessionManager(db);
+const sessionManager = {
+  connectAccount: (...a) => getSessionEngine().connectAccount(...a),
+  addParticipantsToGroup: (...a) => getSessionEngine().addParticipantsToGroup(...a),
+};
 
 export function startGroupPullWorker() {
   const worker = new Worker(

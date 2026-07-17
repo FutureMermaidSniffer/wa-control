@@ -88,6 +88,104 @@
     .warm-pool { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
     .warm-card { border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; font-size: 13px; }
     .warm-card .warm-phone { font-weight: 600; }
+    .phone-fmt { font-variant-numeric: tabular-nums; letter-spacing: 0.02em; white-space: nowrap; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px; }
+
+    /* ===== WhatsApp Web–style Chat Desk ===== */
+    .wa-desk {
+      display: flex; height: calc(100vh - 120px); min-height: 520px; max-height: 860px;
+      border: 1px solid #d1d7db; border-radius: 8px; overflow: hidden;
+      font-family: system-ui, "Segoe UI", "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
+      background: #fff;
+    }
+    .wa-col { display: flex; flex-direction: column; min-width: 0; height: 100%; border-right: 1px solid #e9edef; }
+    .wa-col:last-child { border-right: none; }
+    .wa-accounts { width: 220px; flex-shrink: 0; background: #111b21; color: #e9edef; }
+    .wa-convos { width: 320px; flex-shrink: 0; background: #fff; }
+    .wa-chat { flex: 1; background: #efeae2; position: relative; }
+    .wa-col-head {
+      height: 60px; padding: 0 12px; display: flex; align-items: center; gap: 8px;
+      background: #202c33; color: #e9edef; flex-shrink: 0; font-size: 14px; font-weight: 600;
+    }
+    .wa-convos .wa-col-head, .wa-chat .wa-col-head { background: #f0f2f5; color: #111b21; border-bottom: 1px solid #e9edef; }
+    .wa-col-body { flex: 1; overflow-y: auto; }
+    .wa-acct-row, .wa-convo-row {
+      display: flex; align-items: center; gap: 10px; padding: 10px 12px; cursor: pointer;
+      border-bottom: 1px solid #222e35;
+    }
+    .wa-accounts .wa-acct-row:hover { background: #202c33; }
+    .wa-accounts .wa-acct-row.active { background: #2a3942; }
+    .wa-convo-row { border-bottom: 1px solid #f0f2f5; }
+    .wa-convo-row:hover { background: #f5f6f6; }
+    .wa-convo-row.active { background: #f0f2f5; }
+    .wa-avatar {
+      width: 44px; height: 44px; border-radius: 50%; background: #6b7c85; color: #fff;
+      display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 15px;
+      flex-shrink: 0; overflow: hidden; object-fit: cover;
+    }
+    .wa-avatar img { width: 100%; height: 100%; object-fit: cover; }
+    .wa-acct-meta, .wa-convo-meta { flex: 1; min-width: 0; }
+    .wa-acct-title, .wa-convo-title { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .wa-acct-sub, .wa-convo-snippet {
+      font-size: 12px; color: #8696a0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px;
+    }
+    .wa-accounts .wa-acct-sub { color: #8696a0; }
+    .wa-convo-right { text-align: right; flex-shrink: 0; }
+    .wa-convo-time { font-size: 11px; color: #8696a0; }
+    .wa-unread {
+      display: inline-block; min-width: 18px; height: 18px; line-height: 18px; padding: 0 5px;
+      background: #25d366; color: #fff; border-radius: 999px; font-size: 11px; font-weight: 600; margin-top: 4px;
+    }
+    .wa-messages {
+      flex: 1; overflow-y: auto; padding: 16px 8%;
+      background-color: #efeae2;
+      background-image: url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23d4cdc4' fill-opacity='0.25'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+    }
+    .wa-bubble-row { display: flex; margin-bottom: 4px; }
+    .wa-bubble-row.in { justify-content: flex-start; }
+    .wa-bubble-row.out { justify-content: flex-end; }
+    .wa-bubble {
+      max-width: 65%; padding: 6px 9px 4px; border-radius: 8px; font-size: 14px; line-height: 1.4;
+      box-shadow: 0 1px 0.5px rgba(11,20,26,.13); word-wrap: break-word; white-space: pre-wrap;
+    }
+    .wa-bubble.in { background: #fff; border-top-left-radius: 0; }
+    .wa-bubble.out { background: #d9fdd3; border-top-right-radius: 0; }
+    .wa-bubble-time { font-size: 11px; color: #667781; text-align: right; margin-top: 2px; }
+    .wa-composer {
+      display: flex; align-items: flex-end; gap: 8px; padding: 10px 12px; background: #f0f2f5;
+      border-top: 1px solid #e9edef; flex-shrink: 0; position: relative;
+    }
+    .wa-composer textarea {
+      flex: 1; resize: none; border: none; border-radius: 8px; padding: 10px 12px;
+      font-size: 15px; max-height: 120px; min-height: 42px; font-family: inherit; background: #fff;
+    }
+    .wa-composer textarea:focus { outline: none; }
+    .wa-send {
+      background: #00a884 !important; color: #fff !important; border: none !important;
+      border-radius: 50% !important; width: 42px; height: 42px; padding: 0 !important; font-size: 18px;
+    }
+    .wa-icon-btn {
+      background: transparent !important; border: none !important; font-size: 22px; cursor: pointer;
+      padding: 4px 6px !important; line-height: 1; color: #54656f;
+    }
+    .wa-empty {
+      flex: 1; display: flex; align-items: center; justify-content: center; color: #667781;
+      flex-direction: column; gap: 8px; background: #f0f2f5; font-size: 14px;
+    }
+    .wa-emoji-panel {
+      position: absolute; bottom: 60px; left: 12px; width: 320px; max-height: 220px;
+      background: #fff; border-radius: 10px; box-shadow: 0 4px 20px rgba(0,0,0,.18);
+      padding: 10px; display: none; flex-wrap: wrap; gap: 4px; overflow-y: auto; z-index: 20;
+    }
+    .wa-emoji-panel.open { display: flex; }
+    .wa-emoji-panel button {
+      border: none !important; background: transparent !important; font-size: 22px; padding: 4px !important;
+      cursor: pointer; line-height: 1;
+    }
+    .wa-emoji-panel button:hover { background: #f0f2f5 !important; border-radius: 6px; }
+    .wa-newchat-bar { display: flex; gap: 6px; padding: 8px 12px; background: #fff; border-bottom: 1px solid #e9edef; }
+    .wa-status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 4px; }
+    .wa-status-dot.on { background: #25d366; }
+    .wa-status-dot.off { background: #8696a0; }
 
     /* Modal */
     .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: none; align-items: center; justify-content: center; z-index: 1000; }
@@ -167,6 +265,7 @@
       <!-- Batch toolbar -->
       <div id="batch-bar">
         <span id="batch-count" style="font-weight:600;font-size:13px">0 selected</span>
+        <button class="primary" onclick="batchReconnect()" title="Restore sockets from saved auth — no new pairing code">↻ Reconnect</button>
         <button class="accent" onclick="batchLink()">🔗 Link (Pairing)</button>
         <button onclick="batchEnterWarming()">🔥 Enter Warming</button>
         <button class="danger" onclick="batchDelete()">🗑 Delete</button>
@@ -253,36 +352,62 @@
       </table>
     </div>
 
-    <!-- ===== CHAT DESK ===== -->
-    <div id="tab-desk" class="tab card" style="display:none">
-      <h3 style="margin-top:0">💬 Chat Desk</h3>
-      <div class="row" style="margin-bottom:10px">
-        <select id="desk-account" onchange="loadDeskConversations()" style="min-width:180px"></select>
-        <button onclick="loadDeskConversations()" class="primary">Load Convos</button>
-        <button onclick="refreshDeskMessages()">↻ Refresh</button>
-      </div>
-      <div class="row" style="margin-top:0; align-items:flex-start">
-        <div style="flex:1;min-width:180px">
-          <div class="section-title">Conversations</div>
-          <div id="desk-convos" style="max-height:280px;overflow:auto;border:1px solid var(--border);padding:4px;font-size:13px;border-radius:6px"></div>
+    <!-- ===== CHAT DESK (WhatsApp Web style) ===== -->
+    <div id="tab-desk" class="tab" style="display:none">
+      <div class="wa-desk" id="wa-desk">
+        <!-- Col 1: WS accounts -->
+        <div class="wa-col wa-accounts">
+          <div class="wa-col-head">
+            <span>Accounts</span>
+            <button class="wa-icon-btn" style="margin-left:auto;color:#e9edef" onclick="loadDeskAccounts()" title="Refresh">↻</button>
+          </div>
+          <div class="wa-col-body" id="wa-account-list">
+            <div style="padding:16px;color:#8696a0;font-size:13px">Loading accounts…</div>
+          </div>
         </div>
-        <div style="flex:1;min-width:180px">
-          <div class="section-title">Contacts</div>
-          <button onclick="loadDeskContacts()" style="font-size:11px;padding:2px 6px;margin-bottom:4px">Load</button>
-          <div id="desk-contacts" style="max-height:280px;overflow:auto;border:1px solid var(--border);padding:4px;font-size:13px;border-radius:6px"></div>
+        <!-- Col 2: Conversations -->
+        <div class="wa-col wa-convos">
+          <div class="wa-col-head">
+            <span id="wa-convo-head-title">Chats</span>
+            <button class="wa-icon-btn" style="margin-left:auto" onclick="loadDeskConversations()" title="Refresh chats">↻</button>
+          </div>
+          <div class="wa-newchat-bar">
+            <input id="desk-new-phone" placeholder="New chat number…" style="flex:1;border-radius:8px;border:1px solid #e9edef" />
+            <button class="accent" onclick="deskStartChat()" style="border-radius:8px">＋</button>
+          </div>
+          <div class="wa-col-body" id="desk-convos">
+            <div style="padding:20px;color:#8696a0;font-size:13px;text-align:center">Select an account</div>
+          </div>
         </div>
-        <div style="flex:2;min-width:320px">
-          <div class="section-title">Chat with <span id="desk-current-phone" style="color:var(--accent)"></span></div>
-          <div id="desk-messages" style="height:240px;overflow:auto;background:#fafafa;border:1px solid var(--border);padding:10px;font-size:13px;border-radius:6px"></div>
-          <div class="row" style="margin-top:6px">
-            <input id="desk-input" style="flex:1" placeholder="Type message…" onkeydown="if(event.key==='Enter')deskSend()" />
-            <select id="desk-quick" style="max-width:140px;font-size:12px" title="Quick replies"></select>
-            <button onclick="insertQuickReply()" style="padding:4px 8px">↳</button>
-            <button onclick="deskSend()" class="primary">Send</button>
-            <button onclick="deskMarkRead()">✓ Read</button>
+        <!-- Col 3: Chat -->
+        <div class="wa-col wa-chat">
+          <div class="wa-col-head" id="wa-chat-header">
+            <div class="wa-avatar" id="wa-chat-avatar" style="width:40px;height:40px;font-size:13px">?</div>
+            <div style="flex:1;min-width:0">
+              <div id="desk-current-phone" style="font-size:15px;font-weight:600">Select a chat</div>
+              <div id="wa-chat-sub" style="font-size:12px;color:#667781;font-weight:400"></div>
+            </div>
+            <button class="wa-icon-btn" onclick="deskMarkRead()" title="Mark read">✓</button>
+            <button class="wa-icon-btn" onclick="refreshDeskMessages()" title="Refresh">↻</button>
+          </div>
+          <div class="wa-messages" id="desk-messages">
+            <div class="wa-empty" id="wa-chat-empty">
+              <div style="font-size:48px;opacity:.5">💬</div>
+              <div>WA Control Chat</div>
+              <div style="font-size:12px">Pick an account, then a conversation — or start a new chat</div>
+            </div>
+          </div>
+          <div class="wa-composer" id="wa-composer" style="display:none">
+            <div class="wa-emoji-panel" id="wa-emoji-panel"></div>
+            <button type="button" class="wa-icon-btn" onclick="toggleEmojiPicker()" title="Emoji">😊</button>
+            <select id="desk-quick" style="max-width:100px;font-size:12px;border-radius:8px" title="Quick replies" onchange="insertQuickReply()"></select>
+            <textarea id="desk-input" rows="1" placeholder="Type a message" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();deskSend();}"></textarea>
+            <button type="button" class="wa-send" onclick="deskSend()" title="Send">➤</button>
           </div>
         </div>
       </div>
+      <!-- hidden select for legacy hooks -->
+      <select id="desk-account" style="display:none"></select>
     </div>
 
     <!-- ===== BLASTS ===== -->
@@ -483,6 +608,25 @@
   </div>
 </div>
 
+<!-- ===== QR SCAN MODAL ===== -->
+<div id="qr-modal" class="modal-overlay">
+  <div class="modal" style="max-width:440px">
+    <div class="modal-header">
+      <span>📷 Scan QR to Link</span>
+      <button onclick="closeQrModal()">×</button>
+    </div>
+    <div class="modal-body" id="qr-modal-body">
+      <div class="pairing-display">
+        <p style="color:#555;font-size:13px">Starting QR link…</p>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button onclick="refreshQrLink()" id="qr-refresh-btn" style="display:none">↻ New QR</button>
+      <button onclick="closeQrModal()">Close</button>
+    </div>
+  </div>
+</div>
+
 <!-- ===== ONBOARD MODAL (MoreLogin) ===== -->
 <div id="onboard-modal" class="modal-overlay">
   <div class="modal" style="max-width:520px">
@@ -663,9 +807,8 @@
     if (tab === 'warming') loadWarming();
     if (tab === 'morelogin') { loadMoreLoginDevices(); loadMlOnboardLog(); }
     if (tab === 'desk') {
-      const sel = document.getElementById('desk-account');
-      if (sel && sel.options.length <= 1) loadDeskAccounts();
-      setTimeout(loadQuickReplies, 100);
+      loadDeskAccounts();
+      if (currentDeskAccount) loadDeskConversations();
     }
     if (tab === 'blasts') { setTimeout(loadBlastAccounts, 50); loadBlasts(); }
     if (tab === 'laqun') { setTimeout(loadLaqunAccounts, 50); loadLaqun(); }
@@ -732,16 +875,33 @@
       const tr = document.createElement('tr');
       const health = a.health_score ?? 100;
       const healthColor = health > 70 ? 'var(--green)' : (health > 40 ? 'var(--warn)' : 'var(--danger)');
+      const live = !!a.session_live;
+      const hasAuth = !!a.has_auth;
+      const liveBadge = hasAuth
+        ? (live
+          ? '<span title="Socket open" style="color:var(--green);font-size:11px;margin-left:6px">● live</span>'
+          : '<span title="Auth saved — use Reconnect" style="color:#888;font-size:11px;margin-left:6px">○ stored</span>')
+        : '<span title="Not linked yet" style="color:#bbb;font-size:11px;margin-left:6px">— no auth</span>';
+      // Reconnect when we have auth (primary action). QR/Code for first link or force re-link.
+      const reconnectBtn = hasAuth
+        ? `<button class="primary" onclick="reconnectAccount('${a.id}','${a.phone}')" title="Restore session from saved auth — no new code">${live ? '↻' : '↻ Reconnect'}</button>`
+        : '';
+      const softDiscBtn = live
+        ? `<button onclick="softDisconnectAccount('${a.id}','${a.phone}')" title="Stop socket without unlinking device">⏸</button>`
+        : '';
       tr.innerHTML = `
         <td><input type="checkbox" class="acct-cb" data-id="${a.id}" ${selectedIds.has(a.id) ? 'checked' : ''} onchange="toggleAccountSelect('${a.id}', this.checked)" /></td>
         <td style="font-weight:500">${a.phone}</td>
-        <td><span class="badge ${a.status}">${a.status}</span></td>
+        <td><span class="badge ${a.status}">${a.status}</span>${liveBadge}</td>
         <td style="font-size:11px;color:#888">${a.port_id ? a.port_id.slice(0,8) : '—'}</td>
         <td style="font-size:11px;color:#888">${a.proxy_id ? a.proxy_id.slice(0,8) : '—'}</td>
         <td><span style="font-size:12px;color:${healthColor}">${health}%</span></td>
         <td>
-          <button class="accent" onclick="connectAccountPairing('${a.id}','${a.phone}')" title="Request pairing code (phone must have WA registered)">🔗 Link</button>
-          <button onclick="markAccountRegistered('${a.id}')" title="Set status=primary_registered (reset for fresh pairing)">✓ Mark Reg.</button>
+          ${reconnectBtn}
+          ${softDiscBtn}
+          <button class="primary" onclick="connectAccountQr('${a.id}','${a.phone}',${hasAuth})" title="${hasAuth ? 'Force new QR re-link (wipes auth — prefer Reconnect)' : 'Link via QR scan'}">📷 QR</button>
+          <button class="accent" onclick="connectAccountPairing('${a.id}','${a.phone}',${hasAuth})" title="${hasAuth ? 'Force new pairing code (wipes auth — prefer Reconnect)' : 'Request pairing code'}">🔗 Code</button>
+          <button onclick="markAccountRegistered('${a.id}')" title="Set status=primary_registered (WIPES saved auth — use only for fresh pairing)">✓ Mark Reg.</button>
           <button onclick="enterWarming('${a.id}')" title="Enter warming pool">🔥</button>
           <button onclick="openInDesk('${a.id}','${a.phone}')" title="Open in Chat Desk">💬</button>
           <button class="danger" onclick="deleteAccount('${a.id}','${a.phone}')" title="Delete account">🗑</button>
@@ -758,7 +918,10 @@
   async function importAccounts() {
     const val = document.getElementById('import-phones').value.trim();
     if (!val) return;
-    const phones = val.split(',').map(p => p.trim()).filter(Boolean).map(ph => ({ phone: ph }));
+    // Accept +254… or 254… — server stores digits-only
+    const phones = val.split(',').map(p => p.trim()).filter(Boolean).map(ph => ({
+      phone: normalizePhoneInput(ph) || ph,
+    }));
     const res = await fetch(API + '/accounts/import', { method: 'POST', headers: authHeaders(), body: JSON.stringify({ accounts: phones }) });
     const j = await res.json();
     if (res.ok) showToast(`Imported ${j.imported || phones.length} account(s)`, 'success');
@@ -788,14 +951,271 @@
   }
 
   async function markAccountRegistered(id) {
-    const res = await fetch(API + '/sessions/' + id + '/mark-registered', { method: 'POST', headers: authHeaders(), body: JSON.stringify({ status: 'primary_registered' }) });
-    const j = await res.json();
-    if (res.ok) {
-      showToast('✓ Marked as primary_registered — ready for pairing code', 'success');
-      loadAccounts();
-    } else {
-      showToast('Failed: ' + (j.error || res.status), 'error');
+    showConfirm(
+      'Mark as primary_registered?<br><small style="color:var(--danger)">This <strong>wipes saved Baileys auth</strong>. Prefer <strong>↻ Reconnect</strong> if the account was already linked.</small>',
+      async () => {
+        const res = await fetch(API + '/sessions/' + id + '/mark-registered', { method: 'POST', headers: authHeaders(), body: JSON.stringify({ status: 'primary_registered' }) });
+        const j = await res.json();
+        if (res.ok) {
+          showToast('✓ Marked as primary_registered — ready for pairing code', 'success');
+          loadAccounts();
+        } else {
+          showToast('Failed: ' + (j.error || res.status), 'error');
+        }
+      },
+      true
+    );
+  }
+
+  /**
+   * Safe reconnect — restores companion socket from baileys_auth_state.
+   * Does NOT request a pairing code or QR. Use after socket drop / server restart.
+   */
+  async function reconnectAccount(accountId, phone) {
+    try {
+      showToast('Reconnecting ' + phone + '…', 'info', 2000);
+      const res = await fetch(API + '/sessions/' + accountId + '/reconnect', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({}),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (res.ok) {
+        if (j.status === 'live' && !j.reconnected) {
+          showToast(phone + ' already live', 'success', 2500);
+        } else if (j.status === 'live') {
+          showToast('✓ ' + phone + ' restored (no re-link)', 'success', 3500);
+        } else {
+          showToast('↻ ' + phone + ' connecting…', 'info', 3500);
+        }
+        loadAccounts();
+        if (typeof loadSessions === 'function') loadSessions();
+      } else if (res.status === 409) {
+        showToast('No saved auth — link once with QR or Code first', 'error', 5000);
+      } else {
+        showToast('Reconnect failed: ' + (j.error || res.status) + (j.hint ? ' — ' + j.hint : ''), 'error', 7000);
+      }
+    } catch (e) {
+      showToast('Reconnect network error: ' + e.message, 'error');
     }
+  }
+
+  async function softDisconnectAccount(accountId, phone) {
+    showConfirm(
+      'Soft-disconnect <strong>' + phone + '</strong>?<br><small>Stops the server socket only — does <strong>not</strong> remove the linked device on WhatsApp. Use Reconnect later.</small>',
+      async () => {
+        const res = await fetch(API + '/sessions/' + accountId + '/disconnect', {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({ permanent: false }),
+        });
+        if (res.ok) showToast('Socket stopped for ' + phone + ' (auth kept)', 'success');
+        else showToast('Disconnect failed', 'error');
+        loadAccounts();
+      }
+    );
+  }
+
+  async function batchReconnect() {
+    if (!selectedIds.size) return;
+    const res = await fetch(API + '/accounts', { headers: authHeaders() });
+    const json = await res.json();
+    const byId = Object.fromEntries((json.data || []).map(a => [a.id, a]));
+    const eligible = [...selectedIds].filter(id => byId[id]?.has_auth);
+    if (!eligible.length) {
+      showToast('None of the selected accounts have saved auth to reconnect', 'error');
+      return;
+    }
+    showConfirm(
+      'Reconnect <strong>' + eligible.length + '</strong> account(s) from saved auth?<br><small>No new pairing codes — restores companion sockets only.</small>',
+      async () => {
+        let ok = 0, fail = 0;
+        for (const id of eligible) {
+          try {
+            const r = await fetch(API + '/sessions/' + id + '/reconnect', {
+              method: 'POST',
+              headers: authHeaders(),
+              body: JSON.stringify({}),
+            });
+            if (r.ok) ok++; else fail++;
+          } catch { fail++; }
+        }
+        showToast('Reconnect done: ' + ok + ' ok, ' + fail + ' failed', fail ? 'error' : 'success', 5000);
+        loadAccounts();
+      }
+    );
+  }
+
+  /* ===================== QR SCAN FLOW ===================== */
+  let _qrLinkAccountId = null;
+  let _qrLinkPhone = null;
+  let _qrPollTimer = null;
+  let _qrModalIntentional = false; // only show QR when operator started scan
+  const _connectedToastAt = {}; // phone -> ts debounce
+
+  function closeQrModal() {
+    document.getElementById('qr-modal').classList.remove('open');
+    if (_qrPollTimer) { clearInterval(_qrPollTimer); _qrPollTimer = null; }
+    document.getElementById('qr-refresh-btn').style.display = 'none';
+    _qrModalIntentional = false;
+    _qrLinkAccountId = null;
+  }
+
+  function renderQrModalBody(html) {
+    document.getElementById('qr-modal-body').innerHTML = html;
+  }
+
+  function showQrImage(dataUrl, phone) {
+    renderQrModalBody(`
+      <div class="pairing-display">
+        <p style="color:#555;font-size:13px;margin-bottom:8px">Scan with WhatsApp on <strong>${phone || ''}</strong></p>
+        <img src="${dataUrl}" alt="WhatsApp QR" style="width:260px;height:260px;border:1px solid #e5e7eb;border-radius:8px;background:#fff" />
+        <div class="pairing-steps" style="margin-top:12px">
+          <strong>Steps:</strong><br>
+          1. Open WhatsApp on the primary phone<br>
+          2. ⋮ Settings → Linked Devices → Link a device<br>
+          3. Point the camera at this QR<br>
+          <span style="color:#888;font-size:11px">QR refreshes automatically. Session stays linked after success.</span>
+        </div>
+      </div>`);
+  }
+
+  async function pollQrOnce(accountId) {
+    try {
+      const res = await fetch(API + '/sessions/' + accountId + '/qr', { headers: authHeaders() });
+      const j = await res.json();
+      if (res.ok && j.qrCode) {
+        showQrImage(j.qrCode, j.phone || _qrLinkPhone);
+        return true;
+      }
+      if (res.status === 400 && j.error && j.error.includes('already linked')) {
+        renderQrModalBody(`<div class="notification success">✓ Already linked</div>`);
+        if (_qrPollTimer) { clearInterval(_qrPollTimer); _qrPollTimer = null; }
+        setTimeout(() => { closeQrModal(); loadAccounts(); }, 1200);
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  async function connectAccountQr(accountId, phone, hasAuth = false) {
+    const start = async (forceNew) => {
+      _qrLinkAccountId = accountId;
+      _qrLinkPhone = phone;
+      _qrModalIntentional = true;
+      if (_qrPollTimer) { clearInterval(_qrPollTimer); _qrPollTimer = null; }
+
+      // Show waiting state immediately (QR can take 10–30s for WA handshake — not a clock bug)
+      renderQrModalBody(`
+        <div class="pairing-display">
+          <p style="color:#555;font-size:14px">⏳ Connecting to WhatsApp for <strong>${phone}</strong>…</p>
+          <p style="color:#888;font-size:12px">Handshake + version fetch often takes <strong>10–30 seconds</strong>. Keep this open.</p>
+          <div style="margin-top:12px;height:4px;background:#e5e7eb;border-radius:2px;overflow:hidden">
+            <div style="height:100%;background:var(--accent);animation:progress 25s linear forwards;width:0%"></div>
+          </div>
+          <style>@keyframes progress{to{width:100%}}</style>
+        </div>`);
+      document.getElementById('qr-modal').classList.add('open');
+      document.getElementById('qr-refresh-btn').style.display = 'inline-block';
+
+      try {
+        const res = await fetch(API + '/sessions/connect', {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({
+            accountId,
+            linkingMethod: 'qr_scan',
+            // Only wipe auth for explicit re-link; first-time has no auth
+            forceNew: !!forceNew,
+          })
+        });
+        const j = await res.json();
+        if (res.status === 409 && j.next && j.next.includes('reconnect')) {
+          renderQrModalBody(`
+            <div class="notification info">
+              <strong>Auth already saved.</strong> Prefer <button class="primary" onclick="closeQrModal();reconnectAccount('${accountId}','${phone}')">↻ Reconnect</button>
+              without a new QR.<br><br>
+              <button class="danger" onclick="connectAccountQrForce('${accountId}','${phone}')">Wipe &amp; new QR (risky)</button>
+            </div>`);
+          return;
+        }
+        if (!res.ok && j.error) {
+          renderQrModalBody(`<div class="notification error"><strong>Error:</strong> ${j.error}</div>`);
+          return;
+        }
+        // Poll until first QR (up to ~45s); socket wa:qr also updates the image
+        let tries = 0;
+        _qrPollTimer = setInterval(async () => {
+          tries++;
+          const ok = await pollQrOnce(accountId);
+          if (tries > 60) {
+            clearInterval(_qrPollTimer);
+            _qrPollTimer = null;
+            if (!_qrLinkAccountId) return;
+            const body = document.getElementById('qr-modal-body');
+            if (body && !body.querySelector('img')) {
+              renderQrModalBody(`<div class="notification error">QR not ready after 90s. Click ↻ New QR or check server logs for conflict/proxy errors.</div>`);
+            }
+          }
+        }, 1500);
+        await pollQrOnce(accountId);
+      } catch (e) {
+        renderQrModalBody(`<div class="notification error">Network error: ${e.message}</div>`);
+      }
+      loadAccounts();
+    };
+
+    if (hasAuth) {
+      showConfirm(
+        'Account <strong>' + phone + '</strong> already has saved auth.<br>' +
+        'Prefer <strong>↻ Reconnect</strong> (no phone prompt).<br><br>' +
+        'Continue with a <strong>new QR</strong>? This wipes auth and creates a new linked device — may restrict the number.',
+        () => start(true),
+        true
+      );
+      return;
+    }
+    await start(false);
+  }
+
+  async function connectAccountQrForce(accountId, phone) {
+    // Explicit wipe + new QR (operator confirmed re-link)
+    _qrLinkAccountId = accountId;
+    _qrLinkPhone = phone;
+    _qrModalIntentional = true;
+    if (_qrPollTimer) { clearInterval(_qrPollTimer); _qrPollTimer = null; }
+    renderQrModalBody(`
+      <div class="pairing-display">
+        <p style="color:#555;font-size:14px">⏳ New QR for <strong>${phone}</strong> (force re-link)…</p>
+      </div>`);
+    document.getElementById('qr-modal').classList.add('open');
+    try {
+      const res = await fetch(API + '/sessions/connect', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ accountId, linkingMethod: 'qr_scan', forceNew: true }),
+      });
+      const j = await res.json();
+      if (!res.ok) {
+        renderQrModalBody(`<div class="notification error">${j.error || res.status}</div>`);
+        return;
+      }
+      let tries = 0;
+      _qrPollTimer = setInterval(async () => {
+        tries++;
+        await pollQrOnce(accountId);
+        if (tries > 60) { clearInterval(_qrPollTimer); _qrPollTimer = null; }
+      }, 1500);
+      await pollQrOnce(accountId);
+    } catch (e) {
+      renderQrModalBody(`<div class="notification error">Network error: ${e.message}</div>`);
+    }
+    loadAccounts();
+  }
+
+  async function refreshQrLink() {
+    if (!_qrLinkAccountId) return;
+    // Explicit refresh = new QR challenge (forceNew)
+    await connectAccountQrForce(_qrLinkAccountId, _qrLinkPhone);
   }
 
   /* ===================== PAIRING CODE FLOW ===================== */
@@ -803,80 +1223,110 @@
     document.getElementById('pairing-modal').classList.remove('open');
   }
 
-  async function connectAccountPairing(accountId, phone) {
-    // Open modal immediately with loading state
-    document.getElementById('pairing-modal-body').innerHTML = `
-      <div class="pairing-display">
-        <p style="color:#555;font-size:14px">⏳ Requesting pairing code…</p>
-        <p style="color:#888;font-size:12px">Opening Baileys socket for <strong>${phone}</strong> (direct, ~10s)</p>
-        <div style="margin-top:12px;height:4px;background:#e5e7eb;border-radius:2px;overflow:hidden">
-          <div style="height:100%;background:var(--accent);animation:progress 10s linear forwards;width:0%" id="pair-prog"></div>
-        </div>
-        <style>@keyframes progress{to{width:100%}}</style>
-      </div>`;
-    document.getElementById('pairing-modal').classList.add('open');
+  async function connectAccountPairing(accountId, phone, hasAuth = false) {
+    const start = async (forceNew) => {
+      // Open modal immediately with loading state
+      document.getElementById('pairing-modal-body').innerHTML = `
+        <div class="pairing-display">
+          <p style="color:#555;font-size:14px">⏳ Requesting pairing code…</p>
+          <p style="color:#888;font-size:12px">Opening Baileys socket for <strong>${phone}</strong> (direct, ~10s)</p>
+          <div style="margin-top:12px;height:4px;background:#e5e7eb;border-radius:2px;overflow:hidden">
+            <div style="height:100%;background:var(--accent);animation:progress 10s linear forwards;width:0%" id="pair-prog"></div>
+          </div>
+          <style>@keyframes progress{to{width:100%}}</style>
+        </div>`;
+      document.getElementById('pairing-modal').classList.add('open');
 
-    try {
-      const res = await fetch(API + '/sessions/connect', {
-        method: 'POST',
-        headers: authHeaders(),
-        body: JSON.stringify({
-          accountId,
-          usePairingCode: true,
-          acquisitionMethod: 'phone_assoc',
-          // Direct connection is the default — no proxy. Proxy can be assigned
-          // per-account AFTER successful link for the ongoing session.
-        })
-      });
-      const j = await res.json();
+      try {
+        const res = await fetch(API + '/sessions/connect', {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({
+            accountId,
+            usePairingCode: true,
+            acquisitionMethod: 'phone_assoc',
+            forceNew: !!forceNew,
+            // Direct connection is the default — no proxy. Proxy can be assigned
+            // per-account AFTER successful link for the ongoing session.
+          })
+        });
+        const j = await res.json();
 
-      if (j.pairingCode) {
-        const parts = j.pairingCode.match(/.{1,4}/g) || [j.pairingCode];
-        document.getElementById('pairing-modal-body').innerHTML = `
-          <div class="pairing-display">
-            <div style="color:#555;font-size:13px">Enter this code in WhatsApp on the primary device:</div>
-            <div class="pairing-code">${parts.join('-')}</div>
-            <div class="pairing-steps">
-              <strong>Steps:</strong><br>
-              1. Open WhatsApp on <strong>${phone}</strong> (or the MoreLogin cloud phone)<br>
-              2. ⋮ Settings → Linked Devices → Link a Device<br>
-              3. Tap <em>"Link with phone number instead"</em><br>
-              4. Enter the code above — you have ~2 minutes<br>
-              <br>
-              <span style="color:#888;font-size:11px">Code copied to clipboard. Proxy: ${j.proxy ? j.proxy.type+'://'+j.proxy.host+':'+j.proxy.port : 'Direct (no proxy)'}</span>
-            </div>
-            <button class="primary" onclick="copyToClipboard('${j.pairingCode}')" style="margin-top:8px">📋 Copy Code</button>
-          </div>`;
-        navigator.clipboard.writeText(j.pairingCode).catch(() => {});
-      } else if (j.error) {
-        document.getElementById('pairing-modal-body').innerHTML = `
-          <div class="notification error"><strong>Error:</strong> ${j.error}</div>
-          <div style="margin-top:10px;font-size:12px;color:#666">
-            <strong>Common fixes:</strong><br>
-            1. Click <strong>"✓ Mark Reg."</strong> on the account to reset its status, then retry.<br>
-            2. The phone number must have WhatsApp already installed and registered on the MoreLogin cloud phone.<br>
-            3. If error mentions "proxy" — click Link again (direct connection will be used).
-          </div>`;
-      } else {
-        document.getElementById('pairing-modal-body').innerHTML = `<div class="notification info">Status: ${j.status || 'Connecting…'}</div>`;
+        if (j.pairingCode) {
+          const parts = j.pairingCode.match(/.{1,4}/g) || [j.pairingCode];
+          const digits = String(phone || '').replace(/[^0-9]/g, '');
+          document.getElementById('pairing-modal-body').innerHTML = `
+            <div class="pairing-display">
+              <div style="color:#555;font-size:13px">Enter this code on the <strong>virtual phone</strong> WhatsApp:</div>
+              <div class="pairing-code">${parts.join('-')}</div>
+              <div class="pairing-steps">
+                <strong>Exact steps (MoreLogin / cloud phone):</strong><br>
+                1. WhatsApp on that device must already be logged in as <strong>${digits || phone}</strong><br>
+                2. ⋮ → Linked Devices → Link a Device<br>
+                3. Tap <em>"Link with phone number instead"</em><br>
+                4. If asked for a number, enter <strong style="font-size:15px;letter-spacing:1px">${digits}</strong><br>
+                   <em style="color:#666">(digits only — no + sign, no spaces; we strip + automatically if you stored +254…)</em><br>
+                5. Enter code <strong>${parts.join('-')}</strong> within ~1–2 minutes<br>
+                <br>
+                <div class="notification info" style="text-align:left;font-size:12px;margin:8px 0">
+                  <strong>WhatsApp may say “this may be a scam”.</strong> That is normal for API / pairing-code links
+                  (not a bug). You own this virtual number — tap <strong>Link</strong> / <strong>Continue</strong> on the device.
+                </div>
+                <span style="color:var(--danger);font-size:12px">"Check number or get a new code"? → enter exactly <strong>${digits}</strong> (no +), or click Link again for a fresh code.</span><br>
+                <span style="color:#888;font-size:11px">Proxy: ${j.proxy ? j.proxy.type+'://'+j.proxy.host+':'+j.proxy.port : 'Direct'}</span>
+              </div>
+              <button class="primary" onclick="copyToClipboard('${j.pairingCode}')" style="margin-top:8px">📋 Copy Code</button>
+              <button onclick="copyToClipboard('${digits}')" style="margin-top:8px">📋 Copy number (no +)</button>
+            </div>`;
+          navigator.clipboard.writeText(j.pairingCode).catch(() => {});
+        } else if (j.error) {
+          const wantsReconnect = /reconnect/i.test(j.error || '');
+          document.getElementById('pairing-modal-body').innerHTML = `
+            <div class="notification error"><strong>Error:</strong> ${j.error}</div>
+            <div style="margin-top:10px;font-size:12px;color:#666">
+              ${wantsReconnect
+                ? `<button class="primary" onclick="closePairingModal();reconnectAccount('${accountId}','${phone}')">↻ Reconnect instead</button>
+                   <p style="margin-top:8px">Only force a new code if WhatsApp removed this linked device.</p>
+                   <button class="danger" style="margin-top:6px" onclick="closePairingModal();connectAccountPairing('${accountId}','${phone}',true)">Force new code…</button>`
+                : `<strong>Common fixes:</strong><br>
+            1. Prefer <strong>↻ Reconnect</strong> if this number was already linked.<br>
+            2. The phone number must have WhatsApp already registered on the primary device.<br>
+            3. Only use Code again after auth was wiped or the device was unlinked on the phone.`}
+            </div>`;
+        } else {
+          document.getElementById('pairing-modal-body').innerHTML = `<div class="notification info">Status: ${j.status || 'Connecting…'}</div>`;
+        }
+      } catch (e) {
+        document.getElementById('pairing-modal-body').innerHTML = `<div class="notification error">Network error: ${e.message}</div>`;
       }
-    } catch (e) {
-      document.getElementById('pairing-modal-body').innerHTML = `<div class="notification error">Network error: ${e.message}</div>`;
+      loadAccounts();
+    };
+
+    if (hasAuth) {
+      showConfirm(
+        'Account <strong>' + phone + '</strong> already has saved auth.<br>' +
+        'Prefer <strong>↻ Reconnect</strong> (no phone prompt, no new code).<br><br>' +
+        'Request a <strong>new pairing code</strong>? This wipes auth and creates a new linked device — may restrict the number.',
+        () => start(true),
+        true
+      );
+      return;
     }
-    loadAccounts();
+    await start(false);
   }
 
   async function batchLink() {
     if (!selectedIds.size) return;
     showNotification({
       title: 'Batch Link',
-      message: `Link ${selectedIds.size} accounts via pairing code? Each will open a separate code. Do them one at a time for best results.`,
+      message: `Link ${selectedIds.size} accounts via pairing code? Each will open a separate code. Do them one at a time for best results. Prefer batch Reconnect if already linked.`,
       type: 'info',
       onConfirm: async () => {
         for (const id of selectedIds) {
           const acc = await fetch(API + '/accounts/' + id, { headers: authHeaders() }).then(r => r.json()).catch(() => ({}));
           const phone = acc.data?.phone || id;
-          await connectAccountPairing(id, phone);
+          const hasAuth = !!acc.data?.has_auth;
+          await connectAccountPairing(id, phone, hasAuth);
           // Brief pause between each
           await new Promise(r => setTimeout(r, 2000));
         }
@@ -934,8 +1384,9 @@
       } else if (t.status === 'paused') {
         actions = `<button class="success" onclick="resumeWarmingTask('${t.id}')">▶ Resume</button>`;
       }
+      const pretty = formatPhonePretty(t.phone || '');
       tr.innerHTML = `
-        <td style="font-weight:500">${t.phone || t.ws_account_id?.slice(0,10)}</td>
+        <td style="font-weight:500"><span class="phone-fmt" title="${escapeHtml(t.phone || '')}">${escapeHtml(pretty)}</span></td>
         <td>
           <div style="display:flex;align-items:center;gap:8px">
             <div class="prog-bar" style="flex:1"><div class="fill" style="width:${pct}%"></div></div>
@@ -960,7 +1411,7 @@
     el.innerHTML = `<div class="warm-pool">` +
       eligible.map(a => `
         <div class="warm-card">
-          <div class="warm-phone">${a.phone}</div>
+          <div class="warm-phone phone-fmt" title="${escapeHtml(a.phone || '')}">${escapeHtml(formatPhonePretty(a.phone))}</div>
           <div style="margin:4px 0"><span class="badge ${a.status}">${a.status}</span></div>
           <div style="margin-top:6px;display:flex;gap:4px">
             <button class="success" style="font-size:11px;flex:1" onclick="enterWarming('${a.id}')">🔥 Warm</button>
@@ -1754,59 +2205,230 @@
     showModal('Pending Pairing Codes', html, `<button class="primary" onclick="hideModal()">Close</button>`);
   }
 
-  /* ===================== CHAT DESK ===================== */
-  let currentDeskAccount = null, currentDeskPhone = null;
+  /* ===================== CHAT DESK (WhatsApp Web style) ===================== */
+  let currentDeskAccount = null, currentDeskPhone = null, currentDeskName = null;
+  let deskAccountsCache = [];
+  let deskConvosCache = [];
+  const avatarUrlCache = {}; // key accountId:phone → url
+
+  function escapeHtml(s) {
+    return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function normalizeDeskPhone(raw) {
+    let d = String(raw || '').trim();
+    d = d.replace(/[^\d+]/g, '');
+    if (d.startsWith('+')) d = d.slice(1);
+    return d.replace(/\D/g, '');
+  }
+  function normalizePhoneInput(raw) { return normalizeDeskPhone(raw); }
+
+  function formatPhonePretty(raw) {
+    const d = String(raw ?? '').replace(/\D/g, '');
+    if (!d) return '—';
+    if (d.length < 10) return `+${d}`;
+    if (d.startsWith('1') && d.length === 11) {
+      return `+1 ${d.slice(1, 4)} ${d.slice(4, 7)} ${d.slice(7)}`;
+    }
+    const ccLen = d.length >= 12 ? 3 : 2;
+    const cc = d.slice(0, ccLen);
+    const rest = d.slice(ccLen).replace(/(\d{3})(?=\d)/g, '$1 ').trim();
+    return `+${cc} ${rest}`;
+  }
+  function formatPeerPhone(phone) {
+    if (!phone) return 'Unknown';
+    const p = String(phone);
+    if (p.includes('@g.us')) return 'Group';
+    if (/^\d{15,}$/.test(p)) return `LID ${p.slice(0, 10)}…`;
+    return formatPhonePretty(p);
+  }
+  function initialsFrom(nameOrPhone) {
+    const s = String(nameOrPhone || '?').trim();
+    if (!s) return '?';
+    const parts = s.replace(/^\+/, '').split(/[\s._-]+/).filter(Boolean);
+    if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+    return s.slice(0, 2).toUpperCase();
+  }
+  function formatConvoTime(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    const now = new Date();
+    if (d.toDateString() === now.toDateString()) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const yest = new Date(now); yest.setDate(yest.getDate() - 1);
+    if (d.toDateString() === yest.toDateString()) return 'Yesterday';
+    return d.toLocaleDateString([], { day: 'numeric', month: 'short' });
+  }
+  function truncateSnippet(text, n = 42) {
+    const t = String(text || '').replace(/\s+/g, ' ').trim();
+    return t.length <= n ? t : t.slice(0, n - 1) + '…';
+  }
+  function msgTimeLabel(ts) {
+    if (!ts) return '';
+    const d = new Date(ts);
+    if (Number.isNaN(d.getTime())) return '';
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
 
   async function loadDeskAccounts() {
+    const list = document.getElementById('wa-account-list');
     const sel = document.getElementById('desk-account');
-    sel.innerHTML = '<option value="">— select WS account —</option>';
+    if (list) list.innerHTML = '<div style="padding:16px;color:#8696a0;font-size:13px">Loading…</div>';
     const res = await fetch(API + '/accounts', { headers: authHeaders() });
     const json = await res.json();
-    (json.data || []).forEach(a => { sel.innerHTML += `<option value="${a.id}">${a.phone} (${a.status})</option>`; });
+    deskAccountsCache = json.data || [];
+    if (sel) {
+      sel.innerHTML = '<option value="">—</option>';
+      deskAccountsCache.forEach(a => { sel.innerHTML += `<option value="${a.id}">${a.phone}</option>`; });
+    }
+    if (!list) return;
+    if (!deskAccountsCache.length) {
+      list.innerHTML = '<div style="padding:16px;color:#8696a0;font-size:13px">No accounts</div>';
+      return;
+    }
+    list.innerHTML = deskAccountsCache.map(a => {
+      const on = ['linked', 'active'].includes(a.status);
+      const active = currentDeskAccount === a.id ? 'active' : '';
+      return `<div class="wa-acct-row ${active}" data-id="${a.id}" onclick="selectDeskAccount('${a.id}')">
+        <div class="wa-avatar">${escapeHtml(initialsFrom(a.display_name || a.phone))}</div>
+        <div class="wa-acct-meta">
+          <div class="wa-acct-title phone-fmt">${escapeHtml(formatPhonePretty(a.phone))}</div>
+          <div class="wa-acct-sub"><span class="wa-status-dot ${on?'on':'off'}"></span>${escapeHtml(a.status)}${a.display_name ? ' · ' + escapeHtml(a.display_name) : ''}</div>
+        </div>
+      </div>`;
+    }).join('');
     loadQuickReplies();
   }
 
-  async function loadDeskConversations() {
+  async function selectDeskAccount(accountId) {
+    currentDeskAccount = accountId;
+    currentDeskPhone = null;
+    currentDeskName = null;
     const sel = document.getElementById('desk-account');
-    currentDeskAccount = sel.value;
-    if (!currentDeskAccount) return;
+    if (sel) sel.value = accountId;
+    document.querySelectorAll('.wa-acct-row').forEach(el => {
+      el.classList.toggle('active', el.dataset.id === accountId);
+    });
+    const acc = deskAccountsCache.find(a => a.id === accountId);
+    document.getElementById('wa-convo-head-title').textContent =
+      acc ? formatPhonePretty(acc.phone) : 'Chats';
+    document.getElementById('desk-current-phone').textContent = 'Select a chat';
+    document.getElementById('wa-chat-sub').textContent = '';
+    document.getElementById('wa-composer').style.display = 'none';
+    document.getElementById('desk-messages').innerHTML =
+      '<div class="wa-empty"><div style="font-size:40px;opacity:.45">💬</div><div>Select a conversation</div></div>';
+    await loadDeskConversations();
+  }
+
+  async function loadDeskConversations() {
+    if (!currentDeskAccount) {
+      const c = document.getElementById('desk-convos');
+      if (c) c.innerHTML = '<div style="padding:20px;color:#8696a0;font-size:13px;text-align:center">Select an account</div>';
+      return;
+    }
     const res = await fetch(API + `/accounts/${currentDeskAccount}/conversations`, { headers: authHeaders() });
     const json = await res.json();
+    deskConvosCache = json.data || [];
+    renderDeskConvos();
+    // Lazy-load avatars for top conversations
+    deskConvosCache.slice(0, 15).forEach(c => loadConvoAvatar(c.contact_phone));
+  }
+
+  function renderDeskConvos() {
     const container = document.getElementById('desk-convos');
-    container.innerHTML = '';
-    (json.data || []).forEach(c => {
-      const div = document.createElement('div');
-      div.style.cssText = 'cursor:pointer;padding:5px 6px;border-bottom:1px solid #f0f0f0;';
-      div.innerHTML = `<span style="font-weight:500">${c.contact_phone}</span> <span style="font-size:11px;color:#aaa">(${c.unread_count || 0} unread)</span>`;
-      div.onclick = () => selectDeskConversation(c.contact_phone);
-      container.appendChild(div);
-    });
-    if (!json.data?.length) container.innerHTML = '<em style="color:#bbb;font-size:12px">No conversations yet.</em>';
-    loadDeskContacts(); loadQuickReplies();
+    if (!container) return;
+    if (!deskConvosCache.length) {
+      container.innerHTML = '<div style="padding:24px;color:#8696a0;font-size:13px;text-align:center">No chats yet.<br>Start a new chat above.</div>';
+      return;
+    }
+    container.innerHTML = deskConvosCache.map(c => {
+      const title = c.contact_name || formatPeerPhone(c.contact_phone);
+      const snippet = truncateSnippet(c.last_message_snippet || c.last_message_text || 'Tap to open');
+      const active = currentDeskPhone === c.contact_phone ? 'active' : '';
+      const avKey = `${currentDeskAccount}:${c.contact_phone}`;
+      const avUrl = avatarUrlCache[avKey];
+      const avHtml = avUrl
+        ? `<img src="${escapeHtml(avUrl)}" alt="" onerror="this.parentNode.textContent='${escapeHtml(initialsFrom(title))}'"/>`
+        : escapeHtml(initialsFrom(title));
+      const unread = (c.unread_count > 0) ? `<div class="wa-unread">${c.unread_count > 99 ? '99+' : c.unread_count}</div>` : '';
+      // Use data-* + this — never embed JSON in double-quoted onclick (breaks on names with ")
+      return `<div class="wa-convo-row ${active}" data-phone="${escapeHtml(c.contact_phone)}" data-name="${escapeHtml(c.contact_name || '')}" data-is-group="${c.is_group || (String(c.contact_phone||'').includes('@g.us')) ? '1' : '0'}" onclick="selectDeskConversation(this.dataset.phone, this.dataset.name || null, this.dataset.isGroup==='1')">
+        <div class="wa-avatar" data-av="${escapeHtml(avKey)}">${avHtml}</div>
+        <div class="wa-convo-meta">
+          <div class="wa-convo-title">${c.is_group || String(c.contact_phone||'').includes('@g.us') ? '👥 ' : ''}${escapeHtml(title)}</div>
+          <div class="wa-convo-snippet">${escapeHtml(snippet)}</div>
+        </div>
+        <div class="wa-convo-right">
+          <div class="wa-convo-time">${escapeHtml(formatConvoTime(c.last_message_at))}</div>
+          ${unread}
+        </div>
+      </div>`;
+    }).join('');
   }
 
-  async function loadDeskContacts() {
-    let url = '/contacts?limit=30';
-    if (currentDeskAccount) url += `&assigned_ws_account_id=${currentDeskAccount}`;
-    const res = await fetch(API + url, { headers: authHeaders() });
-    const json = await res.json();
-    const container = document.getElementById('desk-contacts');
-    container.innerHTML = '';
-    const contacts = (json.data || []).slice(0, 30);
-    contacts.forEach(c => {
-      const div = document.createElement('div');
-      div.style.cssText = 'cursor:pointer;padding:4px 6px;border-bottom:1px solid #f5f5f5;font-size:13px';
-      div.textContent = (c.name ? `${c.phone} (${c.name})` : c.phone) + (c.assigned_ws_account_id === currentDeskAccount ? ' ✓' : '');
-      div.onclick = () => selectDeskConversation(c.phone);
-      container.appendChild(div);
-    });
-    if (!contacts.length) container.innerHTML = '<em style="color:#bbb;font-size:12px">No contacts.</em>';
+  async function loadConvoAvatar(phone) {
+    if (!currentDeskAccount || !phone) return;
+    const key = `${currentDeskAccount}:${phone}`;
+    if (avatarUrlCache[key] !== undefined) return;
+    try {
+      const res = await fetch(API + `/accounts/${currentDeskAccount}/contacts/${encodeURIComponent(phone)}/avatar`, { headers: authHeaders() });
+      if (!res.ok) { avatarUrlCache[key] = null; return; }
+      const j = await res.json();
+      avatarUrlCache[key] = j.url || null;
+      // Update DOM avatars
+      document.querySelectorAll(`[data-av="${key}"]`).forEach(el => {
+        if (j.url) el.innerHTML = `<img src="${escapeHtml(j.url)}" alt="" onerror="this.remove()"/>`;
+      });
+      const chatAv = document.getElementById('wa-chat-avatar');
+      if (chatAv && currentDeskPhone === phone && j.url) {
+        chatAv.innerHTML = `<img src="${escapeHtml(j.url)}" alt=""/>`;
+      }
+    } catch {
+      avatarUrlCache[key] = null;
+    }
   }
 
-  async function selectDeskConversation(phone) {
+  async function selectDeskConversation(phone, name, isGroup) {
     currentDeskPhone = phone;
-    document.getElementById('desk-current-phone').textContent = phone;
+    currentDeskName = name || null;
+    const group = isGroup === true || isGroup === '1' || String(phone || '').includes('@g.us');
+    const title = name || (group ? 'Group' : formatPeerPhone(phone));
+    document.getElementById('desk-current-phone').textContent = group ? `👥 ${title}` : title;
+    document.getElementById('wa-chat-sub').textContent = group
+      ? (String(phone).includes('@') ? 'Group chat' : formatPeerPhone(phone))
+      : formatPeerPhone(phone);
+    document.getElementById('wa-composer').style.display = 'flex';
+    const av = document.getElementById('wa-chat-avatar');
+    const key = `${currentDeskAccount}:${phone}`;
+    if (group) {
+      av.textContent = '👥';
+    } else if (avatarUrlCache[key]) {
+      av.innerHTML = `<img src="${escapeHtml(avatarUrlCache[key])}" alt=""/>`;
+    } else {
+      av.textContent = initialsFrom(title);
+      loadConvoAvatar(phone);
+    }
+    document.querySelectorAll('.wa-convo-row').forEach(el => {
+      el.classList.toggle('active', el.dataset.phone === phone);
+    });
     await refreshDeskMessages();
+    deskMarkRead();
+  }
+
+  function appendBubble(box, m) {
+    const row = document.createElement('div');
+    row.className = `wa-bubble-row ${m.direction === 'out' ? 'out' : 'in'}`;
+    const bubble = document.createElement('div');
+    bubble.className = `wa-bubble ${m.direction === 'out' ? 'out' : 'in'}`;
+    const text = document.createElement('div');
+    text.textContent = m.text || '[media]';
+    const time = document.createElement('div');
+    time.className = 'wa-bubble-time';
+    time.textContent = msgTimeLabel(m.timestamp);
+    bubble.appendChild(text);
+    bubble.appendChild(time);
+    row.appendChild(bubble);
+    box.appendChild(row);
   }
 
   async function refreshDeskMessages() {
@@ -1815,42 +2437,90 @@
     const json = await res.json();
     const box = document.getElementById('desk-messages');
     box.innerHTML = '';
-    (json.data || []).forEach(m => {
-      const el = document.createElement('div');
-      el.style.cssText = `margin-bottom:4px;color:${m.direction === 'in' ? 'var(--accent)' : '#333'}`;
-      el.textContent = (m.direction === 'in' ? '← ' : '→ ') + (m.text || '[media]');
-      box.appendChild(el);
-    });
-    box.scrollTop = box.scrollHeight;
+    const convo = json.conversation || {};
+    if (convo.contact_name) {
+      currentDeskName = convo.contact_name;
+      document.getElementById('desk-current-phone').textContent = convo.contact_name;
+      document.getElementById('wa-chat-sub').textContent = formatPeerPhone(convo.contact_phone || currentDeskPhone);
+    }
+    const msgs = json.data || [];
+    if (!msgs.length) {
+      box.innerHTML = '<div class="wa-empty" style="background:transparent"><div>No messages yet — say hello 👋</div></div>';
+    } else {
+      msgs.forEach(m => appendBubble(box, m));
+      box.scrollTop = box.scrollHeight;
+    }
+    document.getElementById('wa-composer').style.display = 'flex';
+  }
+
+  async function deskStartChat() {
+    if (!currentDeskAccount) {
+      showToast('Select an account on the left first', 'error');
+      return;
+    }
+    const raw = document.getElementById('desk-new-phone')?.value || '';
+    const digits = normalizeDeskPhone(raw);
+    if (digits.length < 10) {
+      showToast('Enter full international number (e.g. 254712345678)', 'error');
+      return;
+    }
+    await selectDeskConversation(digits, null);
+    document.getElementById('desk-messages').innerHTML =
+      `<div class="wa-empty" style="background:transparent"><div>New chat with ${escapeHtml(formatPeerPhone(digits))}</div><div style="font-size:12px">Type a message below</div></div>`;
+    document.getElementById('desk-input')?.focus();
   }
 
   async function deskSend() {
-    if (!currentDeskAccount || !currentDeskPhone) { showToast('Select a conversation first', 'error'); return; }
+    if (!currentDeskAccount || !currentDeskPhone) {
+      showToast('Select a conversation first', 'error');
+      return;
+    }
     const input = document.getElementById('desk-input');
-    const text = input.value.trim();
+    const text = (input.value || '').trim();
     if (!text) return;
-    await fetch(API + `/accounts/${currentDeskAccount}/send`, {
-      method: 'POST', headers: authHeaders(),
-      body: JSON.stringify({ to: currentDeskPhone + '@s.whatsapp.net', text })
-    });
+    // Groups keep full JID; 1:1 use phone@s.whatsapp.net
+    let to = currentDeskPhone;
+    if (String(to).includes('@g.us')) {
+      /* group jid as-is */
+    } else if (!String(to).includes('@')) {
+      to = `${normalizeDeskPhone(to)}@s.whatsapp.net`;
+    }
+    // Optimistic bubble
+    const box = document.getElementById('desk-messages');
+    if (box.querySelector('.wa-empty')) box.innerHTML = '';
+    appendBubble(box, { direction: 'out', text, timestamp: new Date().toISOString() });
+    box.scrollTop = box.scrollHeight;
     input.value = '';
-    setTimeout(refreshDeskMessages, 600);
+    const res = await fetch(API + `/accounts/${currentDeskAccount}/send`, {
+      method: 'POST', headers: authHeaders(),
+      body: JSON.stringify({ to, text })
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok && res.status !== 202) showToast(j.error || 'Send failed', 'error');
+    else if (j.error) showToast('Stored; send failed: ' + j.error, 'error');
+    setTimeout(() => loadDeskConversations(), 500);
   }
 
   async function deskMarkRead() {
     if (!currentDeskAccount || !currentDeskPhone) return;
-    await fetch(API + `/accounts/${currentDeskAccount}/chat/${encodeURIComponent(currentDeskPhone)}/read`, { method: 'POST', headers: authHeaders() });
-    loadDeskConversations();
+    await fetch(API + `/accounts/${currentDeskAccount}/chat/${encodeURIComponent(currentDeskPhone)}/read`, {
+      method: 'POST', headers: authHeaders()
+    });
+    const c = deskConvosCache.find(x => x.contact_phone === currentDeskPhone);
+    if (c) c.unread_count = 0;
+    renderDeskConvos();
   }
 
   async function loadQuickReplies() {
     const sel = document.getElementById('desk-quick');
     if (!sel) return;
-    sel.innerHTML = '<option value="">— quick replies —</option>';
+    sel.innerHTML = '<option value="">Quick</option>';
     const res = await fetch(API + '/materials?type=message', { headers: authHeaders() }).catch(() => null);
     if (!res?.ok) return;
     const json = await res.json();
-    (json.data || []).forEach(m => { sel.innerHTML += `<option value="${m.content || ''}">${(m.name || m.content || '').slice(0, 40)}</option>`; });
+    (json.data || []).forEach(m => {
+      sel.innerHTML += `<option value="${escapeHtml(m.content || '')}">${escapeHtml((m.name || m.content || '').slice(0, 28))}</option>`;
+    });
   }
 
   function insertQuickReply() {
@@ -1858,18 +2528,39 @@
     const input = document.getElementById('desk-input');
     if (!sel?.value || !input) return;
     input.value = (input.value + ' ' + sel.value).trim();
+    sel.value = '';
+    input.focus();
+  }
+
+  const EMOJIS = ['😀','😁','😂','🤣','😃','😄','😅','😆','😉','😊','😋','😎','😍','😘','🥰','😗','😙','😚','🙂','🤗','🤩','🤔','🤨','😐','😑','😶','🙄','😏','😣','😥','😮','😯','😪','😫','🥱','😴','😌','😛','😜','😝','🤤','😒','😓','😔','😕','🙃','🤑','😲','🙁','😖','😞','😟','😤','😢','😭','😦','😧','😨','😩','🤯','😬','😰','😱','🥵','🥶','😳','🤪','😵','😡','😠','🤬','😷','🤒','🤕','🤢','🤮','🤧','😇','🥳','🥺','🤠','🤡','😈','👿','👻','💀','👽','🤖','💩','👋','🤚','✋','🖖','👌','🤌','🤏','✌️','🤞','🤟','🤘','🤙','👈','👉','👆','🖕','👇','☝️','👍','👎','✊','👊','🤛','🤜','👏','🙌','👐','🤲','🤝','🙏','💪','🦵','🦶','👂','👃','🧠','👀','👅','👄','💋','❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💔','💕','💞','💓','💗','💖','💘','💝','🔥','✨','⭐','🌟','💯','✅','❌','⚡','🎉','🎊'];
+
+  function toggleEmojiPicker() {
+    const panel = document.getElementById('wa-emoji-panel');
+    if (!panel) return;
+    if (!panel.dataset.ready) {
+      panel.innerHTML = EMOJIS.map(e => `<button type="button" onclick="insertEmoji('${e}')">${e}</button>`).join('');
+      panel.dataset.ready = '1';
+    }
+    panel.classList.toggle('open');
+  }
+  function insertEmoji(emoji) {
+    const input = document.getElementById('desk-input');
+    if (!input) return;
+    const start = input.selectionStart ?? input.value.length;
+    const end = input.selectionEnd ?? input.value.length;
+    input.value = input.value.slice(0, start) + emoji + input.value.slice(end);
+    input.focus();
+    const pos = start + emoji.length;
+    input.setSelectionRange(pos, pos);
   }
 
   function openInDesk(accountId, phone) {
     showTab('desk');
     setTimeout(async () => {
-      const sel = document.getElementById('desk-account');
-      if (sel) { sel.value = accountId; currentDeskAccount = accountId; }
-      await loadDeskConversations();
-      currentDeskPhone = phone;
-      document.getElementById('desk-current-phone').textContent = phone;
-      setTimeout(refreshDeskMessages, 200);
-    }, 100);
+      await loadDeskAccounts();
+      await selectDeskAccount(accountId);
+      if (phone) await selectDeskConversation(normalizeDeskPhone(phone) || phone, null);
+    }, 80);
   }
 
   /* ===================== SOCKET.IO (live desk) ===================== */
@@ -1881,16 +2572,20 @@
       liveSocket.on('connect', () => console.log('[socket] connected'));
       liveSocket.on('wa:message', (data) => {
         const deskVisible = document.getElementById('tab-desk')?.style.display !== 'none';
-        if (deskVisible && currentDeskAccount === data.accountId && currentDeskPhone === data.phone) {
+        if (!deskVisible) return;
+        if (currentDeskAccount === data.accountId && currentDeskPhone === data.phone) {
           const box = document.getElementById('desk-messages');
           if (box) {
-            const el = document.createElement('div');
-            el.style.cssText = `margin-bottom:4px;color:${data.direction==='in'?'var(--accent)':'#333'}`;
-            el.textContent = (data.direction === 'in' ? '← ' : '→ ') + (data.text || '[media]');
-            box.appendChild(el);
+            if (box.querySelector('.wa-empty')) box.innerHTML = '';
+            appendBubble(box, {
+              direction: data.direction,
+              text: data.text,
+              timestamp: data.timestamp ? new Date(Number(data.timestamp) * 1000 || data.timestamp).toISOString() : new Date().toISOString(),
+            });
             box.scrollTop = box.scrollHeight;
           }
-        } else if (deskVisible) loadDeskConversations();
+        }
+        if (currentDeskAccount === data.accountId) loadDeskConversations();
       });
       liveSocket.on('wa:pairing_code', ({ phone, code }) => {
         const parts = code.match(/.{1,4}/g) || [code];
@@ -1902,15 +2597,41 @@
           </div>`;
         document.getElementById('pairing-modal').classList.add('open');
       });
-      liveSocket.on('wa:connected', ({ phone }) => {
-        showToast('✅ ' + phone + ' linked successfully!', 'success', 5000);
+      liveSocket.on('wa:qr', ({ accountId, phone, qrDataUrl }) => {
+        // Only show QR when operator started QR link for this account (prevents spam after linked)
+        if (!qrDataUrl || !_qrModalIntentional) return;
+        if (_qrLinkAccountId && accountId !== _qrLinkAccountId) return;
+        _qrLinkAccountId = accountId;
+        _qrLinkPhone = phone;
+        showQrImage(qrDataUrl, phone);
+        document.getElementById('qr-modal').classList.add('open');
+        document.getElementById('qr-refresh-btn').style.display = 'inline-block';
+      });
+      liveSocket.on('wa:connected', ({ accountId, phone, reconnected }) => {
+        // Debounce toast — conflict loop used to fire this every ~2s
+        const now = Date.now();
+        const last = _connectedToastAt[phone] || 0;
+        if (!reconnected && now - last > 8000) {
+          _connectedToastAt[phone] = now;
+          showToast('✅ ' + phone + ' linked successfully!', 'success', 4000);
+        } else if (reconnected && now - last > 60000) {
+          _connectedToastAt[phone] = now;
+          // silent-ish reconnect — only rare toast
+        }
+        if (_qrLinkAccountId && accountId === _qrLinkAccountId) {
+          renderQrModalBody(`<div class="notification success">✓ Linked successfully — ${phone}</div>`);
+          setTimeout(() => closeQrModal(), 800);
+        }
         loadAccounts(); loadSessions();
       });
       liveSocket.on('wa:warming_started', ({ phone, taskId }) => {
         showToast('🔥 Warming started for ' + phone, 'success', 4000);
         loadWarming();
       });
-      liveSocket.on('wa:disconnected', () => { loadAccounts(); });
+      liveSocket.on('wa:disconnected', ({ conflict }) => {
+        // Don't thrash account list on every conflict flap
+        if (!conflict) loadAccounts();
+      });
     } catch (e) { console.warn('Socket init failed', e); }
   }
 

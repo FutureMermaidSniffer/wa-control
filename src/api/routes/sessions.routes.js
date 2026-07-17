@@ -2,10 +2,12 @@ import { Router } from 'express';
 import {
   listSessions,
   connectNumber,
+  reconnectSession,
   disconnectNumber,
   sendTestMessage,
   listPairingCodes,
   markRegistered,
+  getQr,
 } from '../controllers/sessions.controller.js';
 import { authenticate, requireRole } from '../middleware/auth.js';
 
@@ -14,7 +16,14 @@ const router = Router();
 // Protected - supervisor for management, later agents limited view
 router.get('/sessions', authenticate, listSessions);
 router.get('/sessions/pairing-codes', authenticate, listPairingCodes);
+router.get('/sessions/:accountId/qr', authenticate, requireRole('supervisor'), getQr);
 router.post('/sessions/connect', authenticate, requireRole('supervisor'), connectNumber);
+/**
+ * Safe reconnect — restore companion socket from baileys_auth_state.
+ * Does NOT issue a pairing code or QR. Use after server restart / socket drop
+ * when the multi-device link is still present on the phone.
+ */
+router.post('/sessions/:accountId/reconnect', authenticate, requireRole(['supervisor', 'agent']), reconnectSession);
 router.post('/sessions/:accountId/disconnect', authenticate, requireRole(['supervisor', 'agent']), disconnectNumber);
 router.post('/sessions/:accountId/test-send', authenticate, requireRole('supervisor'), sendTestMessage);
 

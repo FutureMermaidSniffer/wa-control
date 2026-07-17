@@ -11,11 +11,17 @@
 import { Worker } from 'bullmq';
 import { getConnection } from '../queues.js';
 import db from '../../db/connection.js';
-import SessionManager from '../../core/sessions/SessionManager.js';
+import { getSessionEngine } from '../../core/engine/SessionEngine.js';
 import { logger } from '../../utils/logger.js';
 import warmingData from '../../data/warming.data.js';
 
-const sessionManager = new SessionManager(db);
+// Shared engine instance (set at boot in index.js)
+const sessionManager = {
+  connectAccount: (...a) => getSessionEngine().connectAccount(...a),
+  getOrCreateSocket: (...a) => getSessionEngine().getOrCreateSocket(...a),
+  updateProfile: (...a) => getSessionEngine().updateProfile(...a),
+  sendText: (...a) => getSessionEngine().sendText(...a),
+};
 
 // Utility: random int in [min, max]
 const rand = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
@@ -132,45 +138,75 @@ export function startWarmingWorker() {
         logger.info('Warming: presence update', { taskId });
       }
 
-      // Self-message (every run on light tier)
-      if (sock && sock.user?.id) {
+      // === PEER MESSAGING (all tiers when peers exist) ===
+      // Previously only medium/active + self-ping on light → looked like "only messages self"
+      let peerSent = 0;
+      if (sock) {
+        try {
+          // Peers: other accounts in warming with a live-capable status
+          let peers = await db('warming_tasks')
+            .join('ws_accounts', 'warming_tasks.ws_account_id', 'ws_accounts.id')
+            .whereIn('warming_tasks.status', ['executing', 'pending', 'paused'])
+            .whereIn('ws_accounts.status', ['linked', 'active', 'linking', 'offline'])
+            .whereNot('warming_tasks.ws_account_id', task.ws_account_id)
+            .whereNotNull('ws_accounts.phone')
+            .select('ws_accounts.id', 'ws_accounts.phone')
+            .limit(10);
+
+          // Fallback: any other linked/active account (even not in warming) so pool of 1 still has targets
+          if (!peers.length) {
+            peers = await db('ws_accounts')
+              .whereIn('status', ['linked', 'active'])
+              .whereNot('id', task.ws_account_id)
+              .whereNotNull('phone')
+              .select('id', 'phone')
+              .limit(5);
+            if (peers.length) {
+              logger.info('Warming: no other warming peers — using other linked accounts', {
+                taskId, count: peers.length,
+              });
+            }
+          }
+
+          if (peers.length) {
+            const count = tier === 'light' ? 1 : (isFast ? 2 : 1);
+            const shuffled = peers.sort(() => Math.random() - 0.5).slice(0, count);
+            for (const peer of shuffled) {
+              const digits = String(peer.phone || '').replace(/\D/g, '');
+              if (digits.length < 8) continue;
+              const peerJid = `${digits}@s.whatsapp.net`;
+              // Human-like: composing presence toward peer
+              await sock.sendPresenceUpdate('composing', peerJid).catch(() => {});
+              await sleep(rand(800, 2500));
+              await sock.sendPresenceUpdate('paused', peerJid).catch(() => {});
+              const msg = PEER_TEXTS[rand(0, PEER_TEXTS.length - 1)];
+              await sessionManager.sendText(task.ws_account_id, peerJid, msg, { delayMs: rand(500, 2000) });
+              peerSent += 1;
+              logger.info('Warming: peer message sent', { taskId, from: acc.phone, to: peer.phone, msg });
+              await sleep(rand(4000, 12000));
+            }
+          } else {
+            logger.warn('Warming: no peers available — add more linked numbers to the warming pool', { taskId, phone: acc.phone });
+          }
+        } catch (e) {
+          logger.warn('Warming: peer messaging failed (non-critical)', { taskId, error: e.message });
+        }
+      }
+
+      // Self-message only as last resort (status/saved) when no peers — not the primary warm action
+      if (sock && sock.user?.id && peerSent === 0 && tier === 'light') {
         try {
           const selfJid = `${sock.user.id.split(':')[0]}@s.whatsapp.net`;
           await sessionManager.sendText(task.ws_account_id, selfJid,
             `Warm check ${new Date().toISOString().slice(11, 16)}`, { delayMs: rand(500, 1500) });
-          logger.info('Warming: self-message sent', { taskId });
+          logger.info('Warming: self-message (no peers) sent', { taskId });
         } catch (e) { /* may fail if not fully online */ }
       }
 
       await job.updateProgress(35);
 
-      // === TIER 2 — MEDIUM (day 3-6): peer messaging + warm group ===
+      // === TIER 2 — MEDIUM (day 3-6): warm group only (peers already handled above) ===
       if ((tier === 'medium' || tier === 'active') && sock) {
-
-        // --- PEER MESSAGING: find other accounts currently in the warming pool ---
-        try {
-          const peers = await db('warming_tasks')
-            .join('ws_accounts', 'warming_tasks.ws_account_id', 'ws_accounts.id')
-            .whereIn('warming_tasks.status', ['executing', 'pending'])
-            .whereNot('warming_tasks.ws_account_id', task.ws_account_id)
-            .select('ws_accounts.id', 'ws_accounts.phone', 'ws_accounts.jid')
-            .limit(5);
-
-          if (peers.length) {
-            // Pick 1-2 random peers to message
-            const shuffled = peers.sort(() => Math.random() - 0.5).slice(0, isFast ? 2 : 1);
-            for (const peer of shuffled) {
-              const peerJid = peer.jid ||
-                `${peer.phone.replace(/[^\d]/g, '')}@s.whatsapp.net`;
-              const msg = PEER_TEXTS[rand(0, PEER_TEXTS.length - 1)];
-              await sessionManager.sendText(task.ws_account_id, peerJid, msg, { delayMs: rand(2000, 6000) });
-              logger.info('Warming: peer message sent', { taskId, from: acc.phone, to: peer.phone, msg });
-              await sleep(rand(4000, 12000)); // human-like gap between peer messages
-            }
-          }
-        } catch (e) {
-          logger.warn('Warming: peer messaging failed (non-critical)', { taskId, error: e.message });
-        }
 
         // --- WARM GROUP: send to shared warm group if assigned ---
         try {
@@ -224,12 +260,13 @@ export function startWarmingWorker() {
                 .join('ws_accounts', 'warming_tasks.ws_account_id', 'ws_accounts.id')
                 .whereIn('warming_tasks.status', ['executing', 'pending'])
                 .whereNot('warming_tasks.ws_account_id', task.ws_account_id)
-                .select('ws_accounts.id', 'ws_accounts.phone', 'ws_accounts.jid')
+                .select('ws_accounts.id', 'ws_accounts.phone')
                 .limit(3);
 
               if (peers.length) {
                 const peer = peers[rand(0, peers.length - 1)];
-                const peerJid = peer.jid || `${peer.phone.replace(/[^\d]/g, '')}@s.whatsapp.net`;
+                const digits = String(peer.phone || '').replace(/\D/g, '');
+                const peerJid = `${digits}@s.whatsapp.net`;
                 await sock.sendMessage(peerJid, {
                   audio: audioBuf,
                   mimetype: 'audio/ogg; codecs=opus',
