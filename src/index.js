@@ -28,12 +28,18 @@ app.use(helmet({
       "script-src": ["'self'", "'unsafe-inline'"],  // allow inline for our simple UI
       "script-src-attr": ["'unsafe-inline'"],       // required for onclick= etc.
       "style-src": ["'self'", "'unsafe-inline'"],
-      "img-src": ["'self'", "data:", "blob:"],
+      // api.qrserver.com used by supervisor QR panel (pairing remains a separate flow)
+      "img-src": ["'self'", "data:", "blob:", "https://api.qrserver.com"],
       "connect-src": ["'self'", "ws:", "wss:"],
     },
   },
 }));
 app.use(cors());
+
+// Meta WhatsApp Cloud API webhooks — must be mounted before express.json() (raw body for signature)
+import webhooksRoutes from './api/routes/webhooks.routes.js';
+app.use('/api/v1/webhooks', webhooksRoutes);
+
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 

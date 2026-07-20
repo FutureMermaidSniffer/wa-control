@@ -24,13 +24,15 @@ router.delete('/proxies/:id', authenticate, requireRole('supervisor'), deletePro
 router.post('/proxies/:id/test', authenticate, requireRole('supervisor'), testProxy);
 router.post('/proxies/health-check', authenticate, requireRole('supervisor'), runHealthCheck);
 
-// Bulk import from uploaded/proxy credential text file
-// Body: { text: "full file contents", defaultType?: "socks5"|"http", namePrefix?: string, region?: string }
+// Bulk import from paste or .txt — auto-detects per line:
+//   ip:port | ip:port:username:password | USERNAME:PASSWORD@IP:PORT
+// Body: { text, defaultType?: "socks5"|"http", namePrefix?: string, region?: string }
 router.post('/proxies/import', authenticate, requireRole('supervisor'), importProxies);
 
 /**
- * Quick-add a single proxy from a URL string. Returns the proxy ID immediately.
- * Body: { "url": "http://148.113.193.96:5959" }  or  { "url": "socks5://user:pass@host:port" }
+ * Quick-add a single proxy line. Returns the proxy ID immediately.
+ * Accepts: ip:port · ip:port:user:pass · user:pass@ip:port (optional socks5://|http://)
+ * Body: { "url": "user:pass@host:port", "type"?: "socks5" }
  * Use the returned proxyId in POST /sessions/connect to route Baileys through it.
  */
 router.post('/proxies/quick-add', authenticate, requireRole('supervisor'), quickAddProxy);

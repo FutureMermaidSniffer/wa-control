@@ -5,6 +5,7 @@ import {
   disconnectNumber,
   sendTestMessage,
   listPairingCodes,
+  pairingDiagnostics,
   markRegistered,
 } from '../controllers/sessions.controller.js';
 import { authenticate, requireRole } from '../middleware/auth.js';
@@ -14,6 +15,7 @@ const router = Router();
 // Protected - supervisor for management, later agents limited view
 router.get('/sessions', authenticate, listSessions);
 router.get('/sessions/pairing-codes', authenticate, listPairingCodes);
+router.get('/sessions/pairing-diagnostics', authenticate, requireRole('supervisor'), pairingDiagnostics);
 router.post('/sessions/connect', authenticate, requireRole('supervisor'), connectNumber);
 router.post('/sessions/:accountId/disconnect', authenticate, requireRole(['supervisor', 'agent']), disconnectNumber);
 router.post('/sessions/:accountId/test-send', authenticate, requireRole('supervisor'), sendTestMessage);

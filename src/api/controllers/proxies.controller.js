@@ -1,6 +1,6 @@
-import ProxyService from '../../core/proxies/ProxyService.js';
+import ProxyService, { publicProxyRow } from '../../core/proxies/ProxyService.js';
 import db from '../../db/connection.js';
-import { parseProxyText } from '../../utils/proxy-parser.js';
+import { parseProxyText, parseProxyTextDetailed } from '../../utils/proxy-parser.js';
 import { logger } from '../../utils/logger.js';
 
 let proxyService;
@@ -14,8 +14,9 @@ export async function listProxies(req, res, next) {
   try {
     const { status, region } = req.query;
     const svc = getProxyService();
+    // Always return all matching rows (public shape, no password_enc)
     const proxies = await svc.listProxies({ status, region });
-    res.json({ data: proxies });
+    res.json({ data: proxies, count: proxies.length });
   } catch (e) { next(e); }
 }
 
@@ -23,14 +24,14 @@ export async function createProxy(req, res, next) {
   try {
     const svc = getProxyService();
     const proxy = await svc.createProxy(req.body);
-    res.status(201).json({ data: proxy });
+    res.status(201).json({ data: publicProxyRow(proxy) });
   } catch (e) { next(e); }
 }
 
 export async function getProxy(req, res, next) {
   try {
     const svc = getProxyService();
-    const proxy = await svc.getProxy(req.params.id);
+    const proxy = await svc.getProxyPublic(req.params.id);
     if (!proxy) return res.status(404).json({ error: 'Proxy not found' });
     res.json({ data: proxy });
   } catch (e) { next(e); }
@@ -40,7 +41,7 @@ export async function updateProxy(req, res, next) {
   try {
     const svc = getProxyService();
     const proxy = await svc.updateProxy(req.params.id, req.body);
-    res.json({ data: proxy });
+    res.json({ data: publicProxyRow(proxy) });
   } catch (e) { next(e); }
 }
 
@@ -55,10 +56,34 @@ export async function deleteProxy(req, res, next) {
 export async function testProxy(req, res, next) {
   try {
     const svc = getProxyService();
+    // Full row (with password_enc) required for agent auth
     const proxy = await svc.getProxy(req.params.id);
     if (!proxy) return res.status(404).json({ error: 'Proxy not found' });
     const result = await svc.testProxy(proxy);
-    res.json({ data: result });
+    // Optionally refresh status after a single test
+    if (result.ok) {
+      await db('proxies').where({ id: proxy.id }).update({
+        status: 'active',
+        last_checked_at: db.fn.now(),
+        success_rate: Math.min(1, Number(proxy.success_rate || 0.9) * 0.7 + 0.3),
+      });
+    } else if (proxy.status === 'active') {
+      await db('proxies').where({ id: proxy.id }).update({
+        status: 'degraded',
+        last_checked_at: db.fn.now(),
+      });
+    } else {
+      await db('proxies').where({ id: proxy.id }).update({ last_checked_at: db.fn.now() });
+    }
+    res.json({
+      data: {
+        ...result,
+        proxy: publicProxyRow(proxy),
+        host: proxy.host,
+        port: proxy.port,
+        type: proxy.type,
+      },
+    });
   } catch (e) { next(e); }
 }
 
@@ -78,9 +103,28 @@ export async function importProxies(req, res, next) {
     }
 
     const svc = getProxyService();
-    const candidates = parseProxyText(text, { defaultType, namePrefix, region });
+    // Auto-detect per line: ip:port | ip:port:user:pass | user:pass@ip:port
+    const detailed = parseProxyTextDetailed(text, { defaultType, namePrefix, region });
+    const candidates = detailed.proxies;
 
-    const results = { imported: 0, skipped: 0, errors: [], created: [], skippedIds: [] };
+    const results = {
+      imported: 0,
+      skipped: 0,
+      errors: [],
+      created: [],
+      skippedIds: [],
+      invalidLines: detailed.invalidLines,
+      formatCounts: detailed.formatCounts,
+      totalLines: detailed.totalLines,
+      parsed: candidates.length,
+    };
+
+    if (candidates.length === 0) {
+      return res.status(400).json({
+        error: 'No valid proxies found. Supported formats (one per line): ip:port · ip:port:username:password · USERNAME:PASSWORD@IP:PORT',
+        data: results,
+      });
+    }
 
     // Dedup on host+port (we keep type in DB but port usually differs for http vs socks on same provider).
     // When skipping we still return the ID of the existing proxy.
@@ -104,9 +148,18 @@ export async function importProxies(req, res, next) {
       }
 
       try {
-        const created = await svc.createProxy(c);
+        // Don't persist internal format field on the row
+        const { format, ...row } = c;
+        const created = await svc.createProxy(row);
         results.imported++;
-        results.created.push({ id: created.id, name: created.name, host: created.host, port: created.port, type: c.type || defaultType });
+        results.created.push({
+          id: created.id,
+          name: created.name,
+          host: created.host,
+          port: created.port,
+          type: c.type || defaultType,
+          format: format || undefined,
+        });
         existingKeys.add(key);
         hostPortToId.set(key, created.id);
       } catch (err) {
@@ -129,47 +182,63 @@ export async function importProxies(req, res, next) {
     if (results.errors.length > 0) {
       logger.warn('Some proxies failed to import', { errors: results.errors });
     }
+    if (results.invalidLines.length > 0) {
+      logger.warn(`[PROXY-IMPORT] ${results.invalidLines.length} line(s) could not be parsed`, {
+        samples: results.invalidLines.slice(0, 5),
+      });
+    }
 
+    const invalidNote = results.invalidLines.length
+      ? `, ${results.invalidLines.length} invalid line(s)`
+      : '';
     res.status(201).json({
       data: results,
-      message: `Imported ${results.imported}, skipped ${results.skipped} duplicates, ${results.errors.length} errors.`
+      message: `Imported ${results.imported}, skipped ${results.skipped} duplicates, ${results.errors.length} errors${invalidNote}. Detected: ${JSON.stringify(results.formatCounts)}`,
     });
   } catch (e) { next(e); }
 }
 
 /**
- * Quick-add a single proxy from a URL string.
- * Accepts: { url: "http://user:pass@host:port" } or { url: "socks5://host:port" }
+ * Quick-add a single proxy from a URL / line string.
+ * Accepts all auto-detected formats:
+ *   - ip:port
+ *   - ip:port:username:password
+ *   - USERNAME:PASSWORD@IP:PORT
+ *   - optional socks5:// or http:// prefix
  * or a split form: { host, port, type?, username?, password? }
  *
  * Returns the created (or existing) proxy ID immediately.
- *
- * Example for the user's proxy:
- *   POST /api/v1/proxies/quick-add
- *   { "url": "http://148.113.193.96:5959" }
  */
 export async function quickAddProxy(req, res, next) {
   try {
     const svc = getProxyService();
     let proxyData;
+    const defaultType = req.body.type || 'socks5';
 
-    if (req.body.url) {
-      const parsed = parseProxyText(req.body.url, { defaultType: req.body.type || 'http' });
+    if (req.body.url || req.body.line || req.body.text) {
+      const raw = req.body.url || req.body.line || req.body.text;
+      const parsed = parseProxyText(String(raw), { defaultType });
       if (!parsed.length) {
-        return res.status(400).json({ error: 'Could not parse proxy URL. Use format: http://user:pass@host:port or http://host:port' });
+        return res.status(400).json({
+          error: 'Could not parse proxy. Supported: ip:port · ip:port:username:password · USERNAME:PASSWORD@IP:PORT (optional socks5:// or http:// prefix)',
+        });
       }
-      proxyData = parsed[0];
+      const { format, ...rest } = parsed[0];
+      proxyData = rest;
+      proxyData._format = format;
     } else if (req.body.host && req.body.port) {
       proxyData = {
         host: req.body.host,
         port: parseInt(req.body.port, 10),
-        type: req.body.type || 'http',
+        type: defaultType,
         username: req.body.username || req.body.user,
         password: req.body.password || req.body.pass,
         region: req.body.region,
       };
     } else {
-      return res.status(400).json({ error: 'Provide either { url } or { host, port, type? }' });
+      return res.status(400).json({
+        error: 'Provide either { url } (any of the 3 formats) or { host, port, type? }',
+      });
     }
 
     // Check for existing
@@ -178,7 +247,7 @@ export async function quickAddProxy(req, res, next) {
       .first();
     if (existing) {
       return res.json({
-        data: existing,
+        data: publicProxyRow(existing),
         created: false,
         message: `Proxy ${proxyData.host}:${proxyData.port} already exists (id=${existing.id})`,
         next: `Use proxyId: "${existing.id}" when calling /sessions/connect`,
@@ -187,14 +256,18 @@ export async function quickAddProxy(req, res, next) {
 
     if (req.body.name) proxyData.name = req.body.name;
     if (req.body.region) proxyData.region = req.body.region;
-    proxyData.type = proxyData.type || 'http';
+    proxyData.type = proxyData.type || defaultType;
+
+    const format = proxyData._format;
+    delete proxyData._format;
 
     const proxy = await svc.createProxy(proxyData);
-    logger.info(`Quick-added proxy ${proxy.type}://${proxy.host}:${proxy.port} id=${proxy.id}`);
+    logger.info(`Quick-added proxy ${proxy.type}://${proxy.host}:${proxy.port} id=${proxy.id}${format ? ` format=${format}` : ''}`);
 
     res.status(201).json({
-      data: proxy,
+      data: publicProxyRow(proxy),
       created: true,
+      format: format || undefined,
       message: `Proxy added: ${proxy.type}://${proxy.host}:${proxy.port}`,
       next: `Use proxyId: "${proxy.id}" in POST /api/v1/sessions/connect body to route Baileys through this proxy`,
     });

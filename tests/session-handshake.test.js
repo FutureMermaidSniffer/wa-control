@@ -4,6 +4,7 @@ import {
   restartRequiredClose,
   connectionFailureClose,
   connectingUpdate,
+  qrUpdate,
 } from './fixtures/connection-updates.js';
 
 process.env.NODE_ENV = 'test';
@@ -95,10 +96,12 @@ function cleanupHandshake(mgr, accountId) {
 }
 
 describe('SessionManager handshake gate', () => {
-  test('handshakeGateEnabled is false when PAIRING_HANDSHAKE_GATE env unset', async () => {
+  test('handshakeGateEnabled follows createManager gate option', async () => {
     const db = createMockDb();
-    const mgr = new SessionManager(db);
-    assert.equal(mgr.handshakeGateEnabled, false);
+    const mgrOff = createManager(db, { gate: false });
+    const mgrOn = createManager(db, { gate: true });
+    assert.equal(mgrOff.handshakeGateEnabled, false);
+    assert.equal(mgrOn.handshakeGateEnabled, true);
   });
 
   test('_resetPairingAuth does not clear _handshakeInFlight', async () => {
@@ -111,6 +114,43 @@ describe('SessionManager handshake gate', () => {
 
     assert.equal(mgr._handshakeInFlight.get('acc-1'), inflight);
     mgr._handshakeInFlight.delete('acc-1');
+  });
+
+  test('_teardownFailedPairing ends socket; suppress only when requested', async () => {
+    const db = createMockDb('linking');
+    const mgr = createManager(db, { gate: true });
+    const accountId = 'acc-teardown';
+    let ended = false;
+    activeSockets.set(accountId, {
+      sock: {
+        end() {
+          ended = true;
+        },
+      },
+      account: { id: accountId, phone: '+15550001111' },
+      proxy: null,
+    });
+    mgr.pairingInProgress.set(accountId, { phone: '+15550001111', code: 'DEADCODE', startedAt: Date.now() });
+
+    // Soft teardown (retryable) — do not suppress reconnect
+    await mgr._teardownFailedPairing(accountId, { reason: 'test', skipStatusRevert: true, suppressReconnect: false });
+    assert.equal(ended, true);
+    assert.equal(activeSockets.has(accountId), false);
+    assert.equal(mgr.pairingInProgress.has(accountId), false);
+    assert.equal(mgr._suppressReconnect.has(accountId), false);
+
+    // Terminal teardown
+    ended = false;
+    activeSockets.set(accountId, {
+      sock: { end() { ended = true; } },
+      account: { id: accountId, phone: '+15550001111' },
+      proxy: null,
+    });
+    await mgr._teardownFailedPairing(accountId, { reason: 'loggedOut', skipStatusRevert: true, suppressReconnect: true });
+    assert.equal(ended, true);
+    assert.equal(mgr._suppressReconnect.has(accountId), true);
+
+    mgr._suppressReconnect.delete(accountId);
   });
 
   test('_resetPairingAuth preserves linking status when handshake in flight', async () => {
@@ -278,9 +318,49 @@ describe('SessionManager handshake gate', () => {
     const accountId = 'acc-weak';
     activeSockets.set(accountId, { sock: { ws: { isOpen: true } } });
 
-    const result = await mgr._armHandshakeWait(accountId, '+15551234567');
+    const promise = mgr._armHandshakeWait(accountId, '+15551234567');
+    mgr._markCompanionHelloSent(accountId);
+    const result = await promise;
     assert.equal(result.status, 'accepted_weak');
     assert.equal(result.reason, 'socket_open_at_weak_deadline');
+
+    cleanupHandshake(mgr, accountId);
+  });
+
+  test('post-pairing QR rejects handshake (no false weak accept)', async () => {
+    const db = createMockDb('linking');
+    const mgr = createManager(db, { weakMs: 200, waitMs: 500 });
+    const accountId = 'acc-qr-reject';
+
+    const promise = mgr._armHandshakeWait(accountId, '+15551234567');
+    mgr._markCompanionHelloSent(accountId);
+    await mgr._rejectHandshakeWait(accountId, {
+      handshakeStatus: 'rejected',
+      reason: 'post_pairing_qr_fallback',
+    });
+
+    const err = await promise.catch((e) => e);
+    assert.ok(err instanceof HandshakeRejectedError);
+    assert.equal(err.handshakeStatus, 'rejected');
+    assert.equal(err.reason, 'post_pairing_qr_fallback');
+    assert.equal(db._getStatus(), 'primary_registered');
+
+    cleanupHandshake(mgr, accountId);
+  });
+
+  test('weak accept skipped when post-pairing QR already seen', async () => {
+    const db = createMockDb('linking');
+    const mgr = createManager(db, { weakMs: 40, waitMs: 200 });
+    const accountId = 'acc-skip-weak';
+    activeSockets.set(accountId, { sock: { ws: { isOpen: true } } });
+
+    mgr._armHandshakeWait(accountId, '+15551234567');
+    const waiter = mgr._handshakeWaiters.get(accountId);
+    mgr._markCompanionHelloSent(accountId);
+    waiter.postPairingQrSeen = true;
+
+    await new Promise((r) => setTimeout(r, 60));
+    assert.equal(mgr._handshakePhase.get(accountId).status, 'pending');
 
     cleanupHandshake(mgr, accountId);
   });
@@ -310,6 +390,7 @@ describe('SessionManager handshake gate', () => {
     const promise = mgr._armHandshakeWait(accountId, '+15551234567').then((r) => {
       events.push(`resolved:${r.status}`);
     });
+    mgr._markCompanionHelloSent(accountId);
 
     await new Promise((r) => setTimeout(r, 45));
     await promise;

@@ -279,8 +279,38 @@ describe('SessionManager pairing integration (gate=1)', () => {
     assert.equal(db._getStatus(), 'primary_registered');
     assert.equal(codeEvents.length, 0);
     assert.equal(mgr.pairingInProgress.has(accountId), false);
+    // Failed handshake tears down the socket so QR/reconnect spam does not continue
+    assert.equal(activeSockets.has(accountId), false);
+    assert.equal(mgr._suppressReconnect.has(accountId), true);
 
     cleanupManager(mgr, accountId);
+    mgr._suppressReconnect.delete(accountId);
+  });
+
+  test('ambiguous timeout tears down socket and returns 422 semantics', async () => {
+    handshakeUpdateAfterCode = null;
+    const db = createMockDb('linking');
+    const mgr = createIntegrationManager(db);
+    mgr.HANDSHAKE_WAIT_MS = 60;
+    const accountId = 'acc-ambiguous-int';
+    const codeEvents = [];
+
+    mgr.on('pairing_code', (payload) => codeEvents.push(payload));
+
+    const err = await mgr.requestPairingCode(accountId, '+15559876543').catch((e) => e);
+    assert.ok(err instanceof HandshakeRejectedError);
+    assert.equal(err.handshakeStatus, 'ambiguous');
+    assert.equal(err.status, 422);
+    assert.equal(err.reason, 'timeout');
+
+    assert.equal(db._getStatus(), 'primary_registered');
+    assert.equal(codeEvents.length, 0);
+    assert.equal(mgr.pairingInProgress.has(accountId), false);
+    assert.equal(activeSockets.has(accountId), false);
+    assert.equal(mgr._suppressReconnect.has(accountId), true);
+
+    cleanupManager(mgr, accountId);
+    mgr._suppressReconnect.delete(accountId);
   });
 
   test('connection.update close guard keeps linking on restartRequired (not offline)', async () => {

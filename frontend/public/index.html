@@ -401,25 +401,66 @@
         <button class="accent" onclick="addProxy()">Add Proxy</button>
       </div>
 
-      <div class="section-title">Quick-add from URL</div>
-      <div class="row" style="margin-bottom:10px">
-        <input id="px-url" placeholder="http://user:pass@148.113.193.96:5959 or socks5://…" style="flex:1" />
+      <div class="section-title">Quick-add (auto-detect format)</div>
+      <div class="row" style="margin-bottom:6px">
+        <input id="px-url" placeholder="ip:port  ·  ip:port:user:pass  ·  user:pass@ip:port  ·  socks5://…" style="flex:1" />
+        <select id="px-url-type" style="width:90px" title="Default type when no protocol prefix"><option value="socks5">socks5</option><option value="http">http</option></select>
         <button class="accent" onclick="quickAddProxy()">Quick Add</button>
       </div>
-
-      <div class="section-title">Bulk import from .txt file</div>
-      <div class="row" style="margin-bottom:10px;padding:8px;border:1px dashed #ccc;border-radius:6px;background:#fafafa">
-        <input type="file" id="proxy-file" accept=".txt,.csv" />
-        <select id="import-px-type" style="width:90px"><option value="socks5">socks5</option><option value="http">http</option></select>
-        <input id="import-px-prefix" placeholder="name prefix" style="width:120px" />
-        <button onclick="importProxiesFromFile()">Upload &amp; Import</button>
-        <span id="import-result" style="font-size:12px;color:#555"></span>
+      <div style="font-size:11px;color:#666;margin-bottom:10px">
+        Accepts all 3 formats with optional <code>socks5://</code> or <code>http://</code> prefix.
       </div>
 
-      <table id="proxies-table">
-        <thead><tr><th>Name</th><th>Type</th><th>Host:Port</th><th>Status</th><th>Success Rate</th><th>Actions</th></tr></thead>
-        <tbody></tbody>
-      </table>
+      <div class="section-title">Bulk import — paste or upload</div>
+      <div style="margin-bottom:10px;padding:10px;border:1px dashed #ccc;border-radius:6px;background:#fafafa">
+        <div style="font-size:12px;color:#444;margin-bottom:8px;line-height:1.5">
+          <strong>Auto-detects each line</strong> (mix formats freely):
+          <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:6px">
+            <code style="background:#fff;border:1px solid #ddd;padding:2px 6px;border-radius:4px">ip:port</code>
+            <code style="background:#fff;border:1px solid #ddd;padding:2px 6px;border-radius:4px">ip:port:username:password</code>
+            <code style="background:#fff;border:1px solid #ddd;padding:2px 6px;border-radius:4px">USERNAME:PASSWORD@IP:PORT</code>
+          </div>
+          <div style="margin-top:4px;color:#888">Examples: <code>1.2.3.4:1080</code> · <code>1.2.3.4:1080:user:pass</code> · <code>user:pass@1.2.3.4:1080</code></div>
+        </div>
+        <textarea id="proxy-import-text" rows="6" placeholder="Paste proxies here, one per line…&#10;91.132.137.186:10158&#10;91.132.137.186:10448:user:pass&#10;user:pass@91.132.137.186:10453" style="width:100%;box-sizing:border-box;font-family:ui-monospace,monospace;font-size:12px;padding:8px;border:1px solid #ccc;border-radius:4px;resize:vertical" oninput="previewProxyImport()"></textarea>
+        <div class="row" style="margin-top:8px;flex-wrap:wrap;gap:6px">
+          <input type="file" id="proxy-file" accept=".txt,.csv" onchange="loadProxyFileIntoTextarea()" />
+          <select id="import-px-type" style="width:90px" title="Type when line has no protocol"><option value="socks5">socks5</option><option value="http">http</option></select>
+          <input id="import-px-prefix" placeholder="name prefix" style="width:120px" />
+          <input id="import-px-region" placeholder="region (e.g. us)" style="width:100px" />
+          <button class="accent" onclick="importProxiesBulk()">Import detected</button>
+          <button type="button" onclick="previewProxyImport()">Preview</button>
+        </div>
+        <div id="proxy-import-preview" style="font-size:12px;color:#555;margin-top:8px;min-height:18px"></div>
+        <div id="import-result" style="font-size:12px;color:#555;margin-top:4px"></div>
+      </div>
+
+      <div class="section-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+        <span>Stored proxies <span id="proxies-count" style="font-weight:400;color:#888"></span></span>
+        <span class="row" style="margin:0;gap:6px">
+          <button type="button" class="primary" onclick="loadProxies()">↻ Refresh</button>
+          <button type="button" onclick="testAllProxies()">Test all</button>
+        </span>
+      </div>
+      <div id="proxies-list-status" style="font-size:12px;color:#666;margin-bottom:6px"></div>
+      <div style="overflow-x:auto">
+        <table id="proxies-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Type</th>
+              <th>Host:Port</th>
+              <th>Region</th>
+              <th>Auth</th>
+              <th>Status</th>
+              <th>Success</th>
+              <th>Last check</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
     </div>
 
     <!-- ===== MATERIALS ===== -->
@@ -626,7 +667,10 @@
     inputs.forEach((inp, i) => {
       body += `<div class="form-group"><label>${inp.label || inp.name}</label>`;
       if (inp.type === 'select') {
-        body += `<select id="mi-${i}">` + (inp.options || []).map(o => `<option value="${o.value}">${o.label}</option>`).join('') + `</select>`;
+        body += `<select id="mi-${i}">` + (inp.options || []).map(o => {
+          const sel = (inp.value != null && String(inp.value) === String(o.value)) ? ' selected' : '';
+          return `<option value="${o.value}"${sel}>${o.label}</option>`;
+        }).join('') + `</select>`;
       } else {
         body += `<input id="mi-${i}" type="${inp.type||'text'}" value="${inp.value||''}" placeholder="${inp.placeholder||''}" />`;
       }
@@ -751,7 +795,8 @@
         <td style="font-size:11px;color:#888">${a.proxy_id ? a.proxy_id.slice(0,8) : '—'}</td>
         <td><span style="font-size:12px;color:${healthColor}">${health}%</span></td>
         <td>
-          <button class="accent" onclick="connectAccountPairing('${a.id}','${a.phone}')" title="Request pairing code (phone must have WA registered)">🔗 Link</button>
+          <button onclick="connectAccountQr('${a.id}','${a.phone}')" title="Link via QR scan (recommended — scan from MoreLogin phone)">📷 QR</button>
+          <button class="accent" onclick="connectAccountPairing('${a.id}','${a.phone}')" title="Request pairing code (often blocked by WhatsApp)">🔗 Code</button>
           <button onclick="markAccountRegistered('${a.id}')" title="Set status=primary_registered (reset for fresh pairing)">✓ Mark Reg.</button>
           <button onclick="enterWarming('${a.id}')" title="Enter warming pool">🔥</button>
           <button onclick="openInDesk('${a.id}','${a.phone}')" title="Open in Chat Desk">💬</button>
@@ -809,12 +854,16 @@
     }
   }
 
-  /* ===================== PAIRING CODE FLOW ===================== */
+  /* ===================== PAIRING / QR LINK FLOW ===================== */
   let _pairingContext = { accountId: null, phone: null };
+  let _qrContext = { accountId: null, phone: null };
 
   function closePairingModal() {
     document.getElementById('pairing-modal').classList.remove('open');
     _pairingContext = { accountId: null, phone: null };
+    _qrContext = { accountId: null, phone: null };
+    const hdr = document.querySelector('#pairing-modal .modal-header span');
+    if (hdr) hdr.textContent = '🔗 Link WhatsApp Account';
   }
 
   function setPairingContext(accountId, phone) {
@@ -837,11 +886,11 @@
           <span class="pairing-phase-icon">⏳</span>
           <div>
             <strong>Phase 1:</strong> Opening Baileys connection…
-            <div class="pairing-phase-sub">(up to 30s through proxy)</div>
+            <div class="pairing-phase-sub">(up to 60s through proxy)</div>
           </div>
         </div>
         <p style="color:#888;font-size:12px;margin-top:8px">Account: <strong>${p}</strong></p>
-        ${pairingProgressBar(30)}
+        ${pairingProgressBar(60)}
       </div>`;
   }
 
@@ -853,12 +902,12 @@
         <div class="pairing-phase active">
           <span class="pairing-phase-icon">⏳</span>
           <div>
-            <strong>Phase 2:</strong> Verifying WhatsApp accepted link request…
-            <div class="pairing-phase-sub">(up to 18s)</div>
+            <strong>Phase 2:</strong> Waiting for WhatsApp to notify the primary phone…
+            <div class="pairing-phase-sub">(up to ~3×45s — multiple companion_hello attempts if needed)</div>
           </div>
         </div>
-        <p style="color:#888;font-size:12px;margin-top:8px">Account: <strong>${p}</strong></p>
-        ${pairingProgressBar(18)}
+        <p style="color:#888;font-size:12px;margin-top:8px">Account: <strong>${p}</strong> — keep WhatsApp open on the primary device</p>
+        ${pairingProgressBar(90)}
       </div>`;
   }
 
@@ -894,28 +943,53 @@
   }
 
   function renderPairingRejectionPanel(payload, phone) {
-    const p = phone || _pairingContext.phone || '';
-    const { error, reason, statusCode, hint, handshakeStatus } = payload;
+    const p = phone || payload.phone || _pairingContext.phone || '';
+    const accountId = _pairingContext.accountId || payload.accountId || '';
+    const {
+      error, reason, statusCode, hint, handshakeStatus, nextSteps,
+      proxy, transport, diagnosis,
+    } = payload;
+    const steps = Array.isArray(nextSteps) && nextSteps.length
+      ? nextSteps.map((s, i) => `${i + 1}. ${escapeHtml(s)}`).join('<br>')
+      : `1. Confirm WhatsApp is registered and online on the primary / cloud phone for <strong>${escapeHtml(p)}</strong>.<br>
+          2. Retry pairing code (uses a clean socket). Try force-direct if a proxy may be blocking WA.<br>
+          3. Wait ~15 minutes if rate-limited, then retry.<br>
+          4. Use the separate <strong>📷 QR</strong> action on the account if pairing stays blocked.`;
+    const transportLabel = transport
+      || (proxy ? `${proxy.type}://${proxy.host}:${proxy.port}` : 'direct / unknown');
+    const isTimeout = handshakeStatus === 'ambiguous' || reason === 'timeout';
     document.getElementById('pairing-modal-body').innerHTML = `
       <div class="pairing-display">
-        <div class="pairing-phase done"><span>✓</span> Phase 1: Baileys connection attempted</div>
+        <div class="pairing-phase done"><span>✓</span> Phase 1: Baileys socket opened (proxy/network OK enough to connect)</div>
         <div class="pairing-phase active" style="background:#fee2e2;border-color:#fecaca">
           <span class="pairing-phase-icon">✕</span>
-          <div><strong>Phase 3:</strong> Handshake rejected — primary device was not notified</div>
+          <div><strong>Phase 2:</strong> ${isTimeout
+            ? 'WhatsApp never confirmed the link (timeout) — no code shown on purpose'
+            : 'Handshake rejected — primary device was not notified'}</div>
         </div>
         <div class="pairing-rejection" style="margin-top:12px">
-          ${handshakeStatus ? `<div><strong>Status:</strong> <code>${escapeHtml(handshakeStatus)}</code></div>` : ''}
+          <div><strong>HTTP 422</strong> = handshake gate blocked the pairing code (not a crash).</div>
+          ${handshakeStatus ? `<div style="margin-top:6px"><strong>Status:</strong> <code>${escapeHtml(String(handshakeStatus))}</code></div>` : ''}
           ${error ? `<div style="margin-top:6px">${escapeHtml(error)}</div>` : ''}
-          ${reason ? `<div><strong>Reason:</strong> ${escapeHtml(reason)}</div>` : ''}
-          ${statusCode != null && statusCode !== '' ? `<div><strong>WA status code:</strong> ${escapeHtml(statusCode)}</div>` : ''}
+          ${reason ? `<div><strong>Reason:</strong> ${escapeHtml(String(reason))}</div>` : ''}
+          ${statusCode != null && statusCode !== '' ? `<div><strong>WA status code:</strong> ${escapeHtml(String(statusCode))}</div>` : ''}
+          <div style="margin-top:6px"><strong>Transport:</strong> <code>${escapeHtml(transportLabel)}</code></div>
+          ${diagnosis ? `<div class="pairing-hint">${escapeHtml(diagnosis)}</div>` : ''}
           ${hint ? `<div class="pairing-hint">${escapeHtml(hint)}</div>` : ''}
         </div>
         <div style="margin-top:12px;font-size:12px;color:#666;text-align:left">
-          <strong>Common fixes for ${escapeHtml(p)}:</strong><br>
-          1. Retry with <code>forceDirect: true</code> or a different proxy.<br>
-          2. Click <strong>✓ Mark Reg.</strong> then retry after 15 minutes if rate-limited.<br>
-          3. Confirm WhatsApp is registered on the primary / cloud phone.
+          <strong>Next steps:</strong><br>
+          ${steps}
         </div>
+        <div class="row" style="justify-content:center;margin-top:14px;gap:8px;flex-wrap:wrap">
+          <button class="accent" onclick="connectAccountPairing('${escapeHtml(accountId)}','${escapeHtml(p)}',{forceDirect:true})">↻ Retry direct (no proxy)</button>
+          <button onclick="connectAccountPairing('${escapeHtml(accountId)}','${escapeHtml(p)}')">↻ Retry (pick proxy)</button>
+          <button onclick="connectAccountQr('${escapeHtml(accountId)}','${escapeHtml(p)}')">📷 Try QR instead</button>
+        </div>
+        <p style="font-size:11px;color:#888;margin-top:10px">
+          Logs: look for <code>[PAIRING-HANDSHAKE]</code> and <code>USING PROXY</code> / <code>DIRECT</code>.
+          Same number failing on both proxy and direct usually means primary not ready or WA rate-limit — not the selector UI.
+        </p>
       </div>`;
   }
 
@@ -1002,18 +1076,112 @@
     document.getElementById('pairing-modal').classList.add('open');
   }
 
-  async function connectAccountPairing(accountId, phone) {
-    openPairingFlow(accountId, phone);
+  function renderQrWaiting(phone) {
+    const p = escapeHtml(phone || _qrContext.phone || '');
+    document.getElementById('pairing-modal-body').innerHTML = `
+      <div class="pairing-display">
+        <div class="pairing-phase active">
+          <span class="pairing-phase-icon">⏳</span>
+          <div>
+            <strong>Generating QR code…</strong>
+            <div class="pairing-phase-sub">(up to 30s — direct connection)</div>
+          </div>
+        </div>
+        <p style="color:#888;font-size:12px;margin-top:8px">Account: <strong>${p}</strong></p>
+        ${pairingProgressBar(30)}
+      </div>`;
+  }
+
+  function renderQrPanel(phone, qr) {
+    const p = escapeHtml(phone || _qrContext.phone || '');
+    const qrImg = 'https://api.qrserver.com/v1/create-qr-code/?size=280x280&data=' + encodeURIComponent(qr);
+    document.getElementById('pairing-modal-body').innerHTML = `
+      <div class="pairing-display">
+        <div class="pairing-phase done"><span>✓</span> QR ready — scan from primary WhatsApp</div>
+        <img src="${qrImg}" alt="WhatsApp QR" style="max-width:280px;border:1px solid var(--border);border-radius:8px;margin:12px 0" />
+        <div class="pairing-steps">
+          On the <strong>MoreLogin cloud phone</strong> with this number registered:<br>
+          1. Open WhatsApp → <strong>Linked Devices</strong><br>
+          2. Tap <strong>Link a Device</strong> → <strong>Scan QR code</strong><br>
+          3. Point the camera at the code above — keep this page open until linked
+        </div>
+        <p style="font-size:11px;color:#888;margin-top:8px">Account: <strong>${p}</strong></p>
+      </div>`;
+  }
+
+  async function connectAccountQr(accountId, phone) {
+    _qrContext = { accountId, phone };
+    // Clear pairing context so live QR events belong to the QR action only
+    _pairingContext = { accountId: null, phone: null };
+    const hdr = document.querySelector('#pairing-modal .modal-header span');
+    if (hdr) hdr.textContent = '📷 Link via QR Scan';
+    renderQrWaiting(phone);
+    document.getElementById('pairing-modal').classList.add('open');
 
     try {
       const res = await fetch(API + '/sessions/connect', {
         method: 'POST',
         headers: authHeaders(),
         body: JSON.stringify({
+          phone,
           accountId,
-          usePairingCode: true,
-          acquisitionMethod: 'phone_assoc',
-        })
+          forceNew: true,
+          forceDirect: true,
+          acquisitionMethod: 'scan_linked',
+          linkingMethod: 'qr_scan',
+          usePairingCode: false,
+        }),
+      });
+      const j = await res.json();
+      if (j.qr && (j.status === 'scan_qr' || j.qr)) {
+        renderQrPanel(phone, j.qr);
+        showToast('QR ready — scan from MoreLogin phone now', 'success', 6000);
+      } else if (j.status === 'connected') {
+        showToast('✅ ' + phone + ' linked successfully!', 'success', 5000);
+        closePairingModal();
+      } else if (j.status === 'awaiting_qr') {
+        renderPairingErrorPanel(j.hint || 'QR not ready yet — click 📷 QR again in a few seconds', phone);
+        showToast('QR not ready — retry shortly', 'warn', 5000);
+      } else {
+        renderPairingErrorPanel(j.error || j.hint || `Link failed (HTTP ${res.status})`, phone);
+        showToast(j.error || 'QR link failed', 'error', 6000);
+      }
+    } catch (e) {
+      renderPairingErrorPanel('Network error: ' + e.message, phone);
+      showToast('Network error: ' + e.message, 'error');
+    }
+    loadAccounts();
+  }
+
+  async function runPairingConnect(accountId, phone, opts = {}) {
+    const hdr = document.querySelector('#pairing-modal .modal-header span');
+    if (hdr) hdr.textContent = '🔗 Link via Pairing Code';
+    openPairingFlow(accountId, phone);
+    // Pairing and QR stay separate — ignore live QR for this modal while pairing
+    _qrContext = { accountId: null, phone: null };
+
+    const body = {
+      accountId,
+      phone,
+      usePairingCode: true,
+      forceNew: true,
+      acquisitionMethod: 'phone_assoc',
+      linkingMethod: 'pairing_code',
+    };
+    if (opts.forceDirect) {
+      body.forceDirect = true;
+      body.proxyId = null;
+    } else if (opts.proxyId) {
+      body.proxyId = opts.proxyId;
+    } else if (opts.proxyId === null) {
+      body.proxyId = null;
+    }
+
+    try {
+      const res = await fetch(API + '/sessions/connect', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify(body),
       });
       const j = await res.json();
       handlePairingApiResponse(res, j, phone);
@@ -1022,6 +1190,110 @@
       showToast('Network error: ' + e.message, 'error');
     }
     loadAccounts();
+  }
+
+  /**
+   * Pairing code flow. Opens a proxy picker (with Test) unless opts already specify
+   * proxyId / forceDirect / skipProxyPicker.
+   * Baileys companion_hello and all later traffic use ws_accounts.proxy_id.
+   */
+  async function connectAccountPairing(accountId, phone, opts = {}) {
+    if (opts.forceDirect || opts.proxyId || opts.proxyId === null || opts.skipProxyPicker) {
+      return runPairingConnect(accountId, phone, opts);
+    }
+    return openPairingProxyPicker(accountId, phone);
+  }
+
+  async function openPairingProxyPicker(accountId, phone) {
+    let proxies = [];
+    let currentProxyId = '';
+    try {
+      const [pxRes, accRes] = await Promise.all([
+        fetch(API + '/proxies', { headers: authHeaders() }),
+        fetch(API + '/accounts/' + accountId, { headers: authHeaders() }),
+      ]);
+      const pxJ = await pxRes.json();
+      const accJ = await accRes.json();
+      if (!pxRes.ok) {
+        showToast('Failed to load proxies: ' + (pxJ.error || pxRes.status), 'error');
+      }
+      // Show ALL stored proxies so user can pick/test any of them
+      proxies = Array.isArray(pxJ.data) ? pxJ.data : [];
+      _proxiesCache = Object.fromEntries(proxies.map(p => [p.id, p]));
+      currentProxyId = accJ.data?.proxy_id || accJ.proxy_id || '';
+    } catch (e) {
+      showToast('Failed to load proxies: ' + e.message, 'error');
+    }
+
+    const optionsHtml = [
+      `<option value="">— Direct (no proxy) —</option>`,
+      ...proxies.map(p => {
+        const label = `${p.name || p.host}:${p.port}  [${p.type}] ${p.status || ''}${p.region ? ' · ' + p.region : ''}`.trim();
+        const sel = currentProxyId && p.id === currentProxyId ? ' selected' : '';
+        return `<option value="${p.id}"${sel}>${escapeHtml(label)}</option>`;
+      }),
+    ].join('');
+
+    const body = `
+      <div class="notification info" style="margin-bottom:10px">
+        Phone <strong>${escapeHtml(phone)}</strong><br>
+        Companion handshake (and the live session after link) exits via this IP.<br>
+        <span style="font-size:12px;color:#666">Tip: keep the same proxy after linking. Test before pairing if unsure.</span>
+      </div>
+      <div class="form-group">
+        <label>Proxy for this link (${proxies.length} stored)</label>
+        <div class="row" style="gap:6px;align-items:center">
+          <select id="pair-proxy-select" style="flex:1">${optionsHtml}</select>
+          <button type="button" id="pair-proxy-test-btn" onclick="testSelectedPairingProxy()">Test</button>
+        </div>
+      </div>
+      <div id="pair-proxy-test-result" style="font-size:12px;min-height:20px;margin-top:6px;color:#555"></div>
+    `;
+
+    const footer = `
+      <button type="button" onclick="hideModal()">Cancel</button>
+      <button type="button" class="primary" onclick="confirmPairingProxySelection()">Get pairing code</button>
+    `;
+
+    _pairingProxyPick = { accountId, phone };
+    showModal('Pairing code — choose proxy', body, footer);
+  }
+
+  let _pairingProxyPick = null;
+
+  async function testSelectedPairingProxy() {
+    const sel = document.getElementById('pair-proxy-select');
+    const out = document.getElementById('pair-proxy-test-result');
+    const btn = document.getElementById('pair-proxy-test-btn');
+    if (!sel || !out) return;
+    const proxyId = sel.value;
+    if (!proxyId) {
+      out.innerHTML = '<span style="color:#888">Direct mode — no proxy to test (server IP will be used).</span>';
+      return;
+    }
+    if (btn) { btn.disabled = true; btn.textContent = 'Testing…'; }
+    out.innerHTML = '<span style="color:#888">Testing outbound IP via proxy…</span>';
+    try {
+      const result = await runProxyTest(proxyId);
+      out.innerHTML = formatProxyTestHtml(result);
+    } catch (e) {
+      out.innerHTML = `<span style="color:#c00">✗ ${escapeHtml(e.message)}</span>`;
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = 'Test'; }
+    }
+  }
+
+  function confirmPairingProxySelection() {
+    if (!_pairingProxyPick) return;
+    const sel = document.getElementById('pair-proxy-select');
+    const proxyId = sel?.value || null;
+    const { accountId, phone } = _pairingProxyPick;
+    _pairingProxyPick = null;
+    hideModal();
+    runPairingConnect(accountId, phone, {
+      proxyId: proxyId || null,
+      forceDirect: !proxyId,
+    });
   }
 
   async function batchLink() {
@@ -1421,26 +1693,110 @@
   }
 
   /* ===================== PROXIES ===================== */
+  /** id -> proxy row (no secrets); used by Edit / Test / pairing picker */
+  let _proxiesCache = {};
+
+  function formatProxyTestHtml(d) {
+    if (!d) return '<span style="color:#c00">No result</span>';
+    if (d.ok) {
+      const probe = d.probe ? ` · via ${escapeHtml(String(d.probe))}` : '';
+      const note = d.note ? `<div style="color:#a16207;margin-top:2px">${escapeHtml(d.note)}</div>` : '';
+      return `<span style="color:#166534">✓ OK in <strong>${d.latencyMs}ms</strong> · exit IP <strong>${escapeHtml(String(d.ip || 'unknown'))}</strong>${probe}</span>${note}`;
+    }
+    const attempts = Array.isArray(d.attempts) && d.attempts.length
+      ? `<div style="color:#888;margin-top:2px">Tried: ${d.attempts.map(a => `${a.probe}${a.ok ? '✓' : '✗'}`).join(', ')}</div>`
+      : '';
+    return `<span style="color:#b91c1c">✗ Failed${d.latencyMs != null ? ' (' + d.latencyMs + 'ms)' : ''}: ${escapeHtml(String(d.error || d.status || 'unknown'))}</span>${attempts}`;
+  }
+
+  async function runProxyTest(id) {
+    const res = await fetch(API + '/proxies/' + id + '/test', { method: 'POST', headers: authHeaders() });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(j.error || `HTTP ${res.status}`);
+    return j.data || {};
+  }
+
   async function loadProxies() {
-    const res = await fetch(API + '/proxies', { headers: authHeaders() });
-    const json = await res.json();
     const tbody = document.querySelector('#proxies-table tbody');
-    tbody.innerHTML = '';
-    (json.data || []).forEach(p => {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td>${p.name || '—'}</td>
-        <td><span class="badge" style="background:#f0f0f0">${p.type}</span></td>
-        <td style="font-family:monospace;font-size:12px">${p.host}:${p.port}</td>
-        <td><span class="badge ${p.status}">${p.status}</span></td>
-        <td>${Math.round((p.success_rate || 1) * 100)}%</td>
-        <td>
-          <button onclick="editProxy('${p.id}', ${JSON.stringify(p).replace(/"/g,'&quot;')})">Edit</button>
-          <button onclick="testProxy('${p.id}')">Test</button>
-          <button class="danger" onclick="deleteProxy('${p.id}')">Delete</button>
-        </td>`;
-      tbody.appendChild(tr);
-    });
+    const statusEl = document.getElementById('proxies-list-status');
+    const countEl = document.getElementById('proxies-count');
+    if (!tbody) return;
+
+    tbody.innerHTML = '<tr><td colspan="9" style="color:#888;padding:12px">Loading proxies…</td></tr>';
+    if (statusEl) statusEl.textContent = '';
+
+    try {
+      const res = await fetch(API + '/proxies', { headers: authHeaders() });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        tbody.innerHTML = `<tr><td colspan="9" style="color:#b91c1c;padding:12px">Failed to load (${res.status}): ${escapeHtml(json.error || res.statusText || 'error')}</td></tr>`;
+        if (countEl) countEl.textContent = '';
+        if (statusEl) statusEl.textContent = 'Check login / network, then Refresh.';
+        return;
+      }
+
+      const list = Array.isArray(json.data) ? json.data : [];
+      _proxiesCache = Object.fromEntries(list.map(p => [p.id, p]));
+      if (countEl) countEl.textContent = `(${list.length})`;
+
+      tbody.innerHTML = '';
+      if (!list.length) {
+        tbody.innerHTML = `<tr><td colspan="9" style="color:#888;padding:14px">
+          No proxies stored yet. Use Quick-add or Bulk import above, then Refresh.
+        </td></tr>`;
+        if (statusEl) statusEl.textContent = 'Database has 0 proxy rows.';
+        return;
+      }
+
+      list.forEach(p => {
+        const tr = document.createElement('tr');
+        tr.id = 'proxy-row-' + p.id;
+        const rate = Math.round(Number(p.success_rate != null ? p.success_rate : 1) * 100);
+        const checked = p.last_checked_at
+          ? new Date(p.last_checked_at).toLocaleString()
+          : '—';
+        const authLabel = p.username
+          ? escapeHtml(p.username) + (p.has_password ? ' ·••••' : '')
+          : '—';
+        tr.innerHTML = `
+          <td>${escapeHtml(p.name || '—')}</td>
+          <td><span class="badge" style="background:#f0f0f0">${escapeHtml(p.type || '—')}</span></td>
+          <td style="font-family:monospace;font-size:12px">${escapeHtml(p.host)}:${p.port}</td>
+          <td>${escapeHtml(p.region || '—')}</td>
+          <td style="font-size:11px;color:#555">${authLabel}</td>
+          <td><span class="badge ${escapeHtml(p.status || '')}">${escapeHtml(p.status || '—')}</span></td>
+          <td>${rate}%</td>
+          <td style="font-size:11px;color:#888" id="proxy-checked-${p.id}">${escapeHtml(checked)}</td>
+          <td style="white-space:nowrap">
+            <button type="button" onclick="editProxy('${p.id}')">Edit</button>
+            <button type="button" id="proxy-test-btn-${p.id}" onclick="testProxy('${p.id}')">Test</button>
+            <button type="button" class="danger" onclick="deleteProxy('${p.id}')">Delete</button>
+            <div id="proxy-test-result-${p.id}" style="font-size:11px;margin-top:4px;max-width:220px"></div>
+          </td>`;
+        tbody.appendChild(tr);
+      });
+
+      if (statusEl) {
+        statusEl.textContent = `Showing ${list.length} stored proxy(ies). Use Test to verify exit IP before pairing.`;
+      }
+    } catch (e) {
+      tbody.innerHTML = `<tr><td colspan="9" style="color:#b91c1c;padding:12px">Network error: ${escapeHtml(e.message)}</td></tr>`;
+      if (statusEl) statusEl.textContent = 'Could not reach API.';
+    }
+  }
+
+  async function testAllProxies() {
+    const ids = Object.keys(_proxiesCache);
+    if (!ids.length) {
+      showToast('No proxies loaded — click Refresh first', 'warn');
+      return;
+    }
+    showToast(`Testing ${ids.length} proxy(ies)…`, 'info', 3000);
+    for (const id of ids) {
+      await testProxy(id, { quiet: true });
+    }
+    showToast('Finished testing all proxies', 'success');
+    loadProxies();
   }
 
   async function addProxy() {
@@ -1458,52 +1814,161 @@
     else showToast('Failed to add proxy', 'error');
   }
 
+  /** Client-side mirror of backend auto-detect (3 primary formats + optional protocol). */
+  function detectProxyLineClient(rawLine) {
+    if (!rawLine || typeof rawLine !== 'string') return null;
+    let working = rawLine.trim();
+    if (!working || working.startsWith('#') || working.startsWith('//')) return null;
+    const protoMatch = working.match(/^(socks5?|http|https):\/\//i);
+    if (protoMatch) working = working.slice(protoMatch[0].length);
+    let m;
+    // USERNAME:PASSWORD@IP:PORT
+    m = working.match(/^([^@\s:]+):([^@\s]+)@([^@\s:\/]+):(\d{2,5})$/);
+    if (m) return { host: m[3], port: +m[4], username: m[1], password: m[2], format: 'user:pass@ip:port' };
+    // ip:port:username:password
+    m = working.match(/^([^@\s:\/]+):(\d{2,5}):([^:\s]+):(.+)$/);
+    if (m) return { host: m[1], port: +m[2], username: m[3], password: m[4], format: 'ip:port:user:pass' };
+    // user:pass:host:port
+    m = working.match(/^([^:\s]+):([^:\s]+):([^@\s:\/]+):(\d{2,5})$/);
+    if (m) return { host: m[3], port: +m[4], username: m[1], password: m[2], format: 'user:pass:ip:port' };
+    // ip:port
+    m = working.match(/^([^@\s:\/]+):(\d{2,5})$/);
+    if (m) return { host: m[1], port: +m[2], format: 'ip:port' };
+    return null;
+  }
+
+  function previewProxyImport() {
+    const text = document.getElementById('proxy-import-text').value || '';
+    const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('#') && !l.startsWith('//'));
+    const counts = { 'ip:port': 0, 'ip:port:user:pass': 0, 'user:pass@ip:port': 0, 'user:pass:ip:port': 0 };
+    const seen = new Set();
+    let ok = 0, invalid = 0, dups = 0;
+    const samples = [];
+    for (const line of lines) {
+      const p = detectProxyLineClient(line);
+      if (!p) { invalid++; continue; }
+      counts[p.format] = (counts[p.format] || 0) + 1;
+      const key = p.host + ':' + p.port;
+      if (seen.has(key)) { dups++; continue; }
+      seen.add(key);
+      ok++;
+      if (samples.length < 5) {
+        samples.push(`${p.format} → ${p.host}:${p.port}${p.username ? ' (auth)' : ''}`);
+      }
+    }
+    const el = document.getElementById('proxy-import-preview');
+    if (!lines.length) {
+      el.innerHTML = '<span style="color:#888">Paste or upload proxies to preview auto-detection…</span>';
+      return;
+    }
+    el.innerHTML = `
+      <strong>${ok}</strong> unique proxy(ies) detected
+      · formats: <code>ip:port</code>=${counts['ip:port']}
+      · <code>ip:port:user:pass</code>=${counts['ip:port:user:pass']}
+      · <code>user:pass@ip:port</code>=${counts['user:pass@ip:port']}
+      ${invalid ? ` · <span style="color:#c00">${invalid} invalid</span>` : ''}
+      ${dups ? ` · ${dups} duplicate line(s) in paste` : ''}
+      ${samples.length ? `<div style="margin-top:4px;color:#666">${samples.map(s => escapeHtml(s)).join('<br>')}</div>` : ''}
+    `;
+  }
+
+  async function loadProxyFileIntoTextarea() {
+    const file = document.getElementById('proxy-file').files[0];
+    if (!file) return;
+    const text = await file.text();
+    const ta = document.getElementById('proxy-import-text');
+    // Append if paste area already has content
+    ta.value = ta.value.trim() ? (ta.value.replace(/\s*$/, '') + '\n' + text) : text;
+    previewProxyImport();
+    showToast(`Loaded ${file.name} into import box`, 'info');
+  }
+
   async function quickAddProxy() {
     const url = document.getElementById('px-url').value.trim();
-    if (!url) { showToast('Enter a proxy URL first', 'error'); return; }
+    if (!url) { showToast('Enter a proxy line first', 'error'); return; }
+    const type = document.getElementById('px-url-type')?.value || 'socks5';
+    const detected = detectProxyLineClient(url);
+    if (!detected) {
+      showToast('Unrecognized format. Use: ip:port · ip:port:user:pass · user:pass@ip:port', 'error');
+      return;
+    }
     const res = await fetch(API + '/proxies/quick-add', {
       method: 'POST', headers: authHeaders(),
-      body: JSON.stringify({ url })
+      body: JSON.stringify({ url, type })
     });
     const j = await res.json();
     if (res.ok) {
-      showToast((j.created ? 'Proxy added' : 'Proxy already exists') + ': ' + (j.data?.id || ''), 'success');
+      const fmt = j.format || detected.format;
+      showToast((j.created ? 'Proxy added' : 'Already exists') + ` [${fmt}]: ${j.data?.host || ''}:${j.data?.port || ''}`, 'success');
       if (j.next) showToast(j.next, 'info', 5000);
+      document.getElementById('px-url').value = '';
       loadProxies();
     } else showToast('Failed: ' + (j.error || res.status), 'error');
   }
 
-  async function importProxiesFromFile() {
-    const file = document.getElementById('proxy-file').files[0];
-    if (!file) { showToast('Select a file first', 'error'); return; }
-    const text = await file.text();
+  async function importProxiesBulk() {
+    const text = (document.getElementById('proxy-import-text').value || '').trim();
+    if (!text) { showToast('Paste proxies or upload a .txt file first', 'error'); return; }
     const defaultType = document.getElementById('import-px-type').value;
     const namePrefix = document.getElementById('import-px-prefix').value || '';
+    const region = document.getElementById('import-px-region').value || undefined;
     const res = await fetch(API + '/proxies/import', {
       method: 'POST', headers: authHeaders(),
-      body: JSON.stringify({ text, defaultType, namePrefix })
+      body: JSON.stringify({ text, defaultType, namePrefix, region })
     });
     const j = await res.json();
     const r = j.data || {};
-    document.getElementById('import-result').textContent = j.message || '';
-    showToast(`Imported ${r.imported || 0}, skipped ${r.skipped || 0}`, r.imported > 0 ? 'success' : 'info');
-    loadProxies();
+    const fc = r.formatCounts || {};
+    let msg = j.message || j.error || '';
+    if (r.invalidLines?.length) {
+      msg += ` Invalid samples: ${r.invalidLines.slice(0, 3).join(' | ')}`;
+    }
+    document.getElementById('import-result').textContent = msg;
+    if (res.ok) {
+      showToast(`Imported ${r.imported || 0}, skipped ${r.skipped || 0}, invalid ${r.invalidLines?.length || 0}`, r.imported > 0 ? 'success' : 'info');
+      if (r.imported > 0) {
+        document.getElementById('proxy-import-text').value = '';
+        document.getElementById('proxy-import-preview').textContent = '';
+        document.getElementById('proxy-file').value = '';
+      }
+      loadProxies();
+    } else {
+      showToast('Import failed: ' + (j.error || res.status), 'error');
+    }
+  }
+
+  /** @deprecated name kept for any leftover onclick refs */
+  async function importProxiesFromFile() {
+    await loadProxyFileIntoTextarea();
+    return importProxiesBulk();
   }
 
   async function editProxy(id, current) {
+    const p = current || _proxiesCache[id];
+    if (!p) {
+      showToast('Proxy not in cache — Refresh the list first', 'error');
+      return;
+    }
     showNotification({
       title: 'Edit Proxy',
       type: 'info',
       inputs: [
-        { name: 'name', label: 'Name', value: current.name || '' },
-        { name: 'type', label: 'Type', type: 'select', options: [{ value: 'socks5', label: 'SOCKS5' }, { value: 'http', label: 'HTTP' }], value: current.type },
-        { name: 'host', label: 'Host', value: current.host || '' },
-        { name: 'port', label: 'Port', type: 'number', value: current.port || '' },
-        { name: 'username', label: 'Username', value: current.username || '' },
-        { name: 'password', label: 'Password (leave blank to keep)', type: 'password' }
+        { name: 'name', label: 'Name', value: p.name || '' },
+        { name: 'type', label: 'Type', type: 'select', options: [{ value: 'socks5', label: 'SOCKS5' }, { value: 'http', label: 'HTTP' }], value: p.type },
+        { name: 'host', label: 'Host', value: p.host || '' },
+        { name: 'port', label: 'Port', type: 'number', value: p.port || '' },
+        { name: 'username', label: 'Username', value: p.username || '' },
+        { name: 'password', label: 'Password (leave blank to keep)', type: 'password' },
+        { name: 'region', label: 'Region', value: p.region || '' },
       ],
       onConfirm: async (vals) => {
-        const update = { name: vals.name, type: vals.type, host: vals.host, port: parseInt(vals.port) };
+        const update = {
+          name: vals.name,
+          type: vals.type,
+          host: vals.host,
+          port: parseInt(vals.port, 10),
+          region: vals.region || null,
+        };
         if (vals.username) update.username = vals.username;
         if (vals.password) update.password = vals.password;
         const res = await fetch(API + '/proxies/' + id, { method: 'PUT', headers: authHeaders(), body: JSON.stringify(update) });
@@ -1514,23 +1979,41 @@
   }
 
   async function deleteProxy(id) {
-    showConfirm('Delete this proxy? This cannot be undone.', async () => {
+    const p = _proxiesCache[id];
+    const label = p ? `${p.host}:${p.port}` : id.slice(0, 8);
+    showConfirm(`Delete proxy <strong>${escapeHtml(label)}</strong>? This cannot be undone.`, async () => {
       const res = await fetch(API + '/proxies/' + id, { method: 'DELETE', headers: authHeaders() });
       if (res.ok) { showToast('Proxy deleted', 'success'); loadProxies(); }
       else showToast('Delete failed', 'error');
     }, true);
   }
 
-  async function testProxy(id) {
-    const res = await fetch(API + '/proxies/' + id + '/test', { method: 'POST', headers: authHeaders() });
-    const j = await res.json();
-    const d = j.data || {};
-    if (d.ok) showModal('Proxy Test — OK ✓',
-      `<div class="notification success">✓ Connected in <strong>${d.latencyMs}ms</strong><br>Outbound IP: <strong>${d.ip || 'unknown'}</strong></div>`,
-      `<button class="primary" onclick="hideModal()">OK</button>`);
-    else showModal('Proxy Test — Failed ✗',
-      `<div class="notification error">✗ Failed: ${d.error || 'unknown error'}</div>`,
-      `<button class="primary" onclick="hideModal()">OK</button>`);
+  async function testProxy(id, opts = {}) {
+    const btn = document.getElementById('proxy-test-btn-' + id);
+    const inline = document.getElementById('proxy-test-result-' + id);
+    if (btn) { btn.disabled = true; btn.textContent = '…'; }
+    if (inline) inline.innerHTML = '<span style="color:#888">Testing…</span>';
+
+    try {
+      const d = await runProxyTest(id);
+      if (inline) inline.innerHTML = formatProxyTestHtml(d);
+      if (!opts.quiet) {
+        if (d.ok) {
+          showToast(`Proxy OK · ${d.ip} · ${d.latencyMs}ms`, 'success', 4000);
+        } else {
+          showToast(`Proxy failed: ${d.error || d.status || 'unknown'}`, 'error', 5000);
+        }
+      }
+      const checkedEl = document.getElementById('proxy-checked-' + id);
+      if (checkedEl) checkedEl.textContent = new Date().toLocaleString();
+      return d;
+    } catch (e) {
+      if (inline) inline.innerHTML = `<span style="color:#c00">✗ ${escapeHtml(e.message)}</span>`;
+      if (!opts.quiet) showToast('Test error: ' + e.message, 'error');
+      return { ok: false, error: e.message };
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = 'Test'; }
+    }
   }
 
   /* ===================== MATERIALS ===================== */
@@ -1542,7 +2025,8 @@
     (json.data || []).forEach(m => {
       let preview = m.content || '';
       if (m.type === 'avatar' && m.content) {
-        preview = `<img src="/uploads/${m.content}" style="max-height:36px;max-width:36px;vertical-align:middle;border-radius:50%" /> <small>${m.content}</small>`;
+        const safe = String(m.content).replace(/"/g, '');
+        preview = `<img src="/uploads/${safe}" alt="" style="max-height:36px;max-width:36px;vertical-align:middle;border-radius:50%" onerror="this.style.display='none';this.nextElementSibling&&(this.nextElementSibling.textContent='(missing file) '+this.nextElementSibling.textContent)" /> <small style="color:#888">${safe}</small>`;
       } else if (m.type === 'audio') {
         preview = `🎵 ${m.content}`;
       }
@@ -2041,6 +2525,17 @@
             box.scrollTop = box.scrollHeight;
           }
         } else if (deskVisible) loadDeskConversations();
+      });
+      liveSocket.on('wa:qr', ({ phone, qr, accountId }) => {
+        // Only update the modal when the user started an explicit QR flow.
+        // Pairing-code attempts also emit QR from Baileys pre-auth; keep that path separate.
+        if (!_qrContext.accountId) return;
+        if (accountId && accountId !== _qrContext.accountId) return;
+        if (!qr) return;
+        const hdr = document.querySelector('#pairing-modal .modal-header span');
+        if (hdr) hdr.textContent = '📷 Link via QR Scan';
+        renderQrPanel(phone || _qrContext.phone, qr);
+        document.getElementById('pairing-modal').classList.add('open');
       });
       liveSocket.on('wa:pairing_handshake', (payload) => {
         if (!pairingHandshakeMatchesContext(payload)) return;

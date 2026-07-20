@@ -182,25 +182,39 @@ PAIRING_HANDSHAKE_GATE=1
 **When you see 422**
 - The Baileys socket connected (or attempted to), but the handshake gate did not get a trusted accept signal.
 - **Do not** paste a code from logs or an old response — no pending link was created server-side.
+- After a 422, the pairing socket is **torn down** (no multi-minute QR-ref spam / reconnect 401 loops).
 
-**Typical body**
+**Typical body (Connection Failure)**
 ```json
 {
   "error": "Pairing handshake rejected: Connection Failure",
   "handshakeStatus": "rejected",
   "reason": "Connection Failure",
   "statusCode": 405,
-  "hint": "Primary device was not notified. Try forceDirect:true, a different proxy, or wait 15 minutes."
+  "hint": "Primary device was not notified. Try forceDirect:true, a different proxy, or wait 15 minutes. QR remains a separate fallback.",
+  "nextSteps": [
+    "Confirm WhatsApp is fully registered and online on the primary / cloud phone",
+    "Retry with forceDirect:true (isolation) or a residential proxy that reaches web.whatsapp.com",
+    "Wait ~15 minutes if you have spammed connect (rate limits)",
+    "Use the separate QR link action if pairing remains blocked from this network path"
+  ]
 }
 ```
+
+**`handshakeStatus: ambiguous` (timeout)**
+- No `restartRequired` within `HANDSHAKE_WAIT_MS` (default 18s).
+- Often followed historically by post-pairing QR and sometimes `401` close with `location: odn` — Meta rejected companion registration from that IP path.
+- Socket is stopped on timeout so the UI/server do not keep generating QR noise for a failed pairing attempt.
+- Pairing code and QR stay **separate** actions; use QR only if you intentionally choose that path.
 
 **Fixes**
 1. `forceDirect: true` on `/sessions/connect` (skips proxy for this attempt only).
 2. Different residential proxy pool (see §2 SOCKS5 NotAllowed).
 3. Wait 15+ minutes if rate-limited; do not spam `/connect`.
 4. Confirm primary WhatsApp is fully registered and on a recent APK.
+5. If pairing stays blocked from this VPS egress, use the separate **QR** account action (not automatic fallback).
 
-The UI maps 422 to the **Phase 3 rejection panel** with `reason`, `statusCode`, and `hint`.
+The UI maps 422 to the **Phase 3 rejection panel** with `reason`, `statusCode`, `hint`, `nextSteps`, and retry-code buttons.
 
 ---
 

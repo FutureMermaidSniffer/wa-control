@@ -25,6 +25,33 @@ export async function listSessions(req, res) {
   res.json({ active: active.length, sessions: accounts });
 }
 
+export async function pairingDiagnostics(req, res) {
+  const mgr = getSessionManager();
+  const diagnostics = mgr.getPairingDiagnostics();
+
+  const accounts = await db('ws_accounts')
+    .select('id', 'phone', 'status', 'proxy_id', 'acquisition_method', 'updated_at')
+    .orderBy('updated_at', 'desc')
+    .limit(20);
+
+  const emulators = await db('cloud_emulators')
+    .select('id', 'phone', 'status', 'morelogin_id', 'ws_account_id', 'updated_at')
+    .orderBy('updated_at', 'desc')
+    .limit(20);
+
+  res.json({
+    ...diagnostics,
+    accounts,
+    emulators,
+    interpretation: {
+      accepted_weak_without_restartRequired:
+        'Likely false positive if postPairingQrSeen=true or phone got no notification',
+      real_accept_signal: 'connection close with restartRequired after companion_hello',
+      morelogin_gap: 'cloud_emulators empty means account is not linked to a MoreLogin device record',
+    },
+  });
+}
+
 export async function listPairingCodes(req, res) {
   // Lightweight visibility endpoint for testing.
   // Shows current codes + the proxy (if any) assigned to the account.
@@ -44,6 +71,34 @@ export async function listPairingCodes(req, res) {
   res.json({ pending: codes.length, codes: enriched });
 }
 
+/** Digits-only form used for Baileys pairing; keep a leading + for E.164-ish storage when present. */
+function normalizeConnectPhone(raw) {
+  if (raw == null || raw === '') return raw;
+  const s = String(raw).trim();
+  const digits = s.replace(/[^\d]/g, '');
+  if (!digits) return s;
+  // Preserve explicit + prefix for storage/display; otherwise store digits as provided.
+  return s.startsWith('+') ? `+${digits}` : digits;
+}
+
+function pairingFailureHint(handshakeStatus, reason) {
+  if (handshakeStatus === 'ambiguous' || reason === 'timeout') {
+    return (
+      'WhatsApp did not confirm the link request in time (no restartRequired). ' +
+      'Primary was likely not notified. Confirm the number is registered and online on the primary device, ' +
+      'use a residential proxy that can reach web.whatsapp.com, or wait ~15 minutes if rate-limited. ' +
+      'QR link remains available as a separate action if pairing stays blocked from this IP.'
+    );
+  }
+  if (reason === 'post_pairing_qr_fallback') {
+    return (
+      'WhatsApp fell back to QR mode after the pairing request — companion_hello was not accepted. ' +
+      'Try forceDirect:true, a different residential proxy, or use the separate QR link action.'
+    );
+  }
+  return 'Primary device was not notified. Try forceDirect:true, a different proxy, or wait 15 minutes. QR remains a separate fallback.';
+}
+
 export async function connectNumber(req, res, next) {
   try {
     let { phone, accountId, portId, proxyId, acquisitionMethod = 'scan_linked', usePairingCode = false } = req.body;
@@ -53,10 +108,29 @@ export async function connectNumber(req, res, next) {
       if (acc) phone = acc.phone;
     }
     if (!phone) return res.status(400).json({ error: 'phone or accountId required' });
+    phone = normalizeConnectPhone(phone);
 
-    // Create or find the account record
+    // Create or find the account record (match normalized or legacy raw forms)
     let account = await db('ws_accounts').where({ phone }).first();
-    const isPairingCodeFlow = usePairingCode || acquisitionMethod === 'phone_assoc';
+    if (!account && accountId) {
+      account = await db('ws_accounts').where({ id: accountId }).first();
+    }
+    if (!account) {
+      const digits = String(phone).replace(/[^\d]/g, '');
+      account = await db('ws_accounts')
+        .whereRaw("regexp_replace(phone, '[^0-9]', '', 'g') = ?", [digits])
+        .first();
+    }
+
+    // Pairing and QR stay separate: pairing only when explicitly requested.
+    // - pairing: usePairingCode / phone_assoc / linkingMethod: pairing_code
+    // - QR: default scan_linked / linkingMethod: qr_scan (no usePairingCode)
+    const linkingMethodHint = req.body.linkingMethod;
+    const isPairingCodeFlow = !!(
+      usePairingCode ||
+      acquisitionMethod === 'phone_assoc' ||
+      linkingMethodHint === 'pairing_code'
+    ) && linkingMethodHint !== 'qr_scan' && linkingMethodHint !== 'scan_code';
 
     if (!account) {
       const insertData = {
@@ -91,6 +165,12 @@ export async function connectNumber(req, res, next) {
       account.port_id = portId;
     }
 
+    // Keep stored phone in sync with normalized form when looked up by accountId / digits.
+    if (account.phone !== phone) {
+      await db('ws_accounts').where({ id: account.id }).update({ phone });
+      account.phone = phone;
+    }
+
     // IMPORTANT (Rocket style): Proxy is selected/updated at the *linking* step,
     // not during primary registration. This is when the critical companion_hello
     // handshake happens.
@@ -120,10 +200,11 @@ export async function connectNumber(req, res, next) {
     const mgr = getSessionManager();
 
     // Expose multiple linking paths (at least 2-3) to match observed Rocket flows.
-    // - pairing_code (default, enter code on primary)
-    // - scan_code (user scans or provides scan data)
+    // - pairing_code (enter code on primary)
+    // - qr_scan / scan_code — separate QR path
     // - verification_code (import via code from primary)
-    const linkingMethod = req.body.linkingMethod || (usePairingCode || acquisitionMethod === 'phone_assoc' ? 'pairing_code' : 'qr_scan');
+    const linkingMethod = linkingMethodHint
+      || (isPairingCodeFlow ? 'pairing_code' : 'qr_scan');
     logger.info(`[LINKING] Path: ${linkingMethod} for ${phone}`);
 
     // For non-pairing paths (scan_code, verification_code), just prepare the account for linking
@@ -139,11 +220,15 @@ export async function connectNumber(req, res, next) {
       });
     }
 
+    // Shared flags — declare once so try/catch and QR path never hit TDZ on const.
+    const forceNew = !!req.body.forceNew;
+    // Temporary testing flag: forceDirect / noProxy / direct skips proxy for this attempt.
+    const forceDirect = !!(req.body.forceDirect || req.body.noProxy || req.body.direct);
+
     // Support phone-less / cloud / phone-primary flow using pairing code
     // (enter code directly in WhatsApp app running in your cloud emulator or on your phone as primary)
     if (linkingMethod === 'pairing_code' || usePairingCode || acquisitionMethod === 'phone_assoc') {
       try {
-        const forceNew = !!req.body.forceNew;
         // If account status is not ready for pairing, revive it.
         // Covers: stuck linking, offline, error, pending_login (imported without pairing mode).
         const prevStatus = account.status;
@@ -152,23 +237,18 @@ export async function connectNumber(req, res, next) {
           account.status = 'primary_registered';
           logger.info(`Revived ${phone} to primary_registered for re-pairing (was ${prevStatus})`);
         }
-        // Temporary testing flag: forceDirect / noProxy / direct skips proxy for this linking attempt only.
-        // Use for non-proxy troubleshooting of the companion handshake (as recommended).
-        // Example: { "phone": "+13185167435", "usePairingCode": true, "forceDirect": true }
-        const forceDirect = !!(req.body.forceDirect || req.body.noProxy || req.body.direct);
 
         const proxyInfo = account.proxy_id
           ? await db('proxies').where({ id: account.proxy_id }).select('id','type','host','port').first()
           : null;
 
-        if (proxyInfo) {
+        if (forceDirect) {
+          logger.info(`[PAIRING-CONNECT] forceDirect for ${phone} — ignoring proxy`);
+        } else if (proxyInfo) {
           logger.info(`[PAIRING-CONNECT] Using proxy ${proxyInfo.id} (${proxyInfo.type}://${proxyInfo.host}:${proxyInfo.port}) for ${phone}`);
         } else {
           logger.info(`[PAIRING-CONNECT] No proxy (direct) for ${phone}`);
         }
-
-        // Extra visible log so users always see the ID even in plain logs
-        // Proxy details logged via structured logger. No loud banners.
 
         // Explicit 'linking' stage for the handshake
         await db('ws_accounts').where({ id: account.id }).update({ status: 'linking' });
@@ -185,18 +265,45 @@ export async function connectNumber(req, res, next) {
           handshakeStatus: normalized.handshakeStatus,
           handshakeWaitMs: normalized.handshakeWaitMs,
           status: 'enter_pairing_code',
-          proxy: proxyInfo ? { id: proxyInfo.id, type: proxyInfo.type, host: proxyInfo.host, port: proxyInfo.port } : null,
+          proxy: (!forceDirect && proxyInfo)
+            ? { id: proxyInfo.id, type: proxyInfo.type, host: proxyInfo.host, port: proxyInfo.port }
+            : null,
           note: 'Proxy shown above (auto-selected if none passed). Watch server logs for the exact "[PAIRING] Creating Baileys socket ..." line.',
           instructions: 'Server prints big banner. Look for "USING PROXY" or "DIRECT". GET /pairing-codes for live view with proxy.'
         });
       } catch (e) {
         if (e instanceof HandshakeRejectedError) {
+          const hint = pairingFailureHint(e.handshakeStatus, e.reason);
+          // Re-read proxy after forceDirect may have cleared it mid-attempt
+          const usedProxyId = forceDirect ? null : account.proxy_id;
+          const usedProxy = usedProxyId
+            ? await db('proxies').where({ id: usedProxyId }).select('id', 'type', 'host', 'port', 'status').first()
+            : null;
           return res.status(422).json({
             error: e.message,
             handshakeStatus: e.handshakeStatus,
-            reason: e.reason,
+            reason: e.reason || e.handshakeStatus,
             statusCode: e.statusCode,
-            hint: 'Primary device was not notified. Try forceDirect:true, a different proxy, or wait 15 minutes.',
+            hint,
+            accountId: account.id,
+            phone: account.phone,
+            proxy: usedProxy
+              ? { id: usedProxy.id, type: usedProxy.type, host: usedProxy.host, port: usedProxy.port, status: usedProxy.status }
+              : null,
+            transport: usedProxy
+              ? `${usedProxy.type}://${usedProxy.host}:${usedProxy.port}`
+              : (forceDirect ? 'direct (forceDirect)' : 'direct'),
+            diagnosis:
+              e.handshakeStatus === 'ambiguous' || e.reason === 'timeout'
+                ? 'Socket often opens fine, but WhatsApp never confirmed companion_hello (no restartRequired). Code is intentionally NOT shown so you do not enter a dead code.'
+                : 'WhatsApp rejected the companion link request; primary was not notified.',
+            nextSteps: [
+              'Confirm WhatsApp is fully registered and ONLINE on the primary / cloud phone for this exact number',
+              'On Proxies page: Test the proxy — only use ones that return ✓ OK with a clean residential exit IP',
+              'Retry with forceDirect (isolation) to see if the proxy IP is the problem',
+              'Wait ~15 minutes if you have spammed connect (rate limits)',
+              'Use the separate 📷 QR link action if pairing stays blocked on this path',
+            ],
           });
         }
         // Surface proxy-specific errors clearly
@@ -208,34 +315,67 @@ export async function connectNumber(req, res, next) {
     }
 
     // Traditional QR scan flow (scan with physical or emulator phone)
+
+    if (forceDirect && account.proxy_id) {
+      await db('ws_accounts').where({ id: account.id }).update({ proxy_id: null });
+      account.proxy_id = null;
+      logger.info(`[QR-CONNECT] forceDirect: cleared proxy for ${phone}`);
+    }
+
+    if (forceNew) {
+      await mgr.disconnectAccount(account.id, false).catch(() => {});
+      await db('ws_accounts').where({ id: account.id }).update({
+        baileys_auth_state: null,
+        status: 'pending_login',
+        updated_at: db.fn.now(),
+      });
+      account.status = 'pending_login';
+      logger.info(`[QR-CONNECT] forceNew: fresh socket for ${phone}`);
+    }
+
+    await db('ws_accounts').where({ id: account.id }).update({ status: 'linking' });
+
+    const QR_WAIT_MS = parseInt(process.env.QR_CONNECT_WAIT_MS || '30000', 10);
+
+    const cleanupQrListeners = () => {
+      mgr.off('qr', qrHandler);
+      mgr.off('connected', connectedHandler);
+    };
+
     const qrHandler = ({ accountId, qr }) => {
-      if (accountId === account.id) {
-        res.json({ accountId: account.id, phone: account.phone, qr, status: 'scan_qr' });
-        mgr.off('qr', qrHandler);
-      }
+      if (accountId !== account.id || res.headersSent) return;
+      cleanupQrListeners();
+      logger.info(`[QR-CONNECT] QR ready for ${account.phone} (waited <${QR_WAIT_MS}ms)`);
+      res.json({ accountId: account.id, phone: account.phone, qr, status: 'scan_qr' });
     };
     mgr.on('qr', qrHandler);
 
     const connectedHandler = ({ accountId }) => {
-      if (accountId === account.id) {
-        mgr.off('qr', qrHandler);
-        mgr.off('connected', connectedHandler);
+      if (accountId !== account.id) return;
+      cleanupQrListeners();
+      if (!res.headersSent) {
+        res.json({ accountId: account.id, phone: account.phone, status: 'connected' });
       }
     };
     mgr.on('connected', connectedHandler);
 
     try {
       await mgr.connectAccount(account.id);
-      setTimeout(() => {
-        if (!res.headersSent) {
-          res.json({ accountId: account.id, phone: account.phone, status: 'connecting_or_connected' });
-        }
-        mgr.off('qr', qrHandler);
-        mgr.off('connected', connectedHandler);
-      }, 800);
+
+      // Baileys often emits QR 1–5s after socket open; 800ms was too short for curl/UI.
+      await new Promise((resolve) => setTimeout(resolve, QR_WAIT_MS));
+      if (!res.headersSent) {
+        logger.warn(`[QR-CONNECT] No QR within ${QR_WAIT_MS}ms for ${account.phone} — socket may still be connecting`);
+        res.json({
+          accountId: account.id,
+          phone: account.phone,
+          status: 'awaiting_qr',
+          hint: 'QR not ready yet. Retry, watch Socket.io wa:qr, or check PM2 logs for "QR generated".',
+        });
+      }
+      cleanupQrListeners();
     } catch (e) {
-      mgr.off('qr', qrHandler);
-      mgr.off('connected', connectedHandler);
+      cleanupQrListeners();
       throw e;
     }
   } catch (err) {

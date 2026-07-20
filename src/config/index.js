@@ -46,6 +46,16 @@ const envSchema = z.object({
   PAIRING_HANDSHAKE_GATE: z.enum(['0', '1']).default('0'),
   HANDSHAKE_WAIT_MS: z.coerce.number().default(18000),
   HANDSHAKE_WEAK_ACCEPT_MS: z.coerce.number().default(12000),
+  // When gate is on, still allow weak accept (socket open) for debug — not proof of phone notify
+  HANDSHAKE_ALLOW_WEAK_WITH_GATE: z.enum(['0', '1']).default('0'),
+  // How many companion_hello attempts per /sessions/connect (restores pre-teardown recovery)
+  PAIRING_HELLO_ATTEMPTS: z.coerce.number().min(1).max(5).default(3),
+  // Auto re-request pairing after Connection Failure (legacy recovery path)
+  PAIRING_AUTO_RETRY_ON_FAILURE: z.enum(['0', '1']).default('1'),
+
+  // Meta WhatsApp Cloud API webhooks (official Business API — separate from Baileys)
+  WHATSAPP_VERIFY_TOKEN: z.string().min(8).optional(),
+  WHATSAPP_APP_SECRET: z.string().optional(),
 });
 
 let config;

@@ -40,3 +40,7 @@ export function loggedOutClose() {
 export function connectingUpdate() {
   return { connection: 'connecting' };
 }
+
+export function qrUpdate() {
+  return { qr: '2@mock-qr-payload' };
+}
