@@ -113,8 +113,20 @@ import groupPullsRoutes from './api/routes/groupPulls.routes.js';
 app.use('/api/v1', groupPullsRoutes);
 
 import messagesData from './data/messages.data.js';
+import { extractPeer } from './utils/wa-jid.js';
 
-// Jobs / workers (BullMQ + Redis)
+// SessionEngine facade FIRST so workers share the same Baileys sockets + events
+import SessionManager from './core/sessions/SessionManager.js';
+import { SessionEngine, setSessionEngine, getSessionEngine } from './core/engine/SessionEngine.js';
+import { setSessionManager } from './api/controllers/sessions.controller.js';
+const sessionManager = new SessionManager(db);
+const sessionEngine = new SessionEngine(db, sessionManager);
+app.set('sessionManager', sessionManager);
+app.set('sessionEngine', sessionEngine);
+setSessionEngine(sessionEngine);
+setSessionManager(sessionEngine);
+
+// Jobs / workers (BullMQ + Redis) — after engine is registered
 import { startWarmingWorker } from './jobs/workers/warming.worker.js';
 import { closeQueues } from './jobs/queues.js';
 let warmingWorker;
@@ -144,30 +156,16 @@ try {
 app.use(notFound);
 app.use(errorHandler);
 
-// Attach session manager for use in realtime / jobs later
-import SessionManager from './core/sessions/SessionManager.js';
-import { setSessionManager } from './api/controllers/sessions.controller.js';
-const sessionManager = new SessionManager(db);
-app.set('sessionManager', sessionManager);
-setSessionManager(sessionManager);
-
-// Wire SessionManager events to Socket.io so the Supervisor desk can show live QR / connection status
-// (this is the beginning of the realtime desk experience)
-sessionManager.on('qr', ({ accountId, phone, qr }) => {
-  io.emit('wa:qr', { accountId, phone, qr });
+// Wire engine events to Socket.io (QR includes PNG data URL for desk UI)
+sessionEngine.on('qr', ({ accountId, phone, qr, qrDataUrl }) => {
+  io.emit('wa:qr', { accountId, phone, qr, qrDataUrl });
 });
 
-// Handshake verification gate phases (pending / accepted / rejected)
-sessionManager.on('pairing_handshake', (payload) => {
-  io.emit('wa:pairing_handshake', payload);
-});
-
-// Support for phone-less / cloud emulator linking via pairing code
-sessionManager.on('pairing_code', ({ accountId, phone, code }) => {
+sessionEngine.on('pairing_code', ({ accountId, phone, code }) => {
   io.emit('wa:pairing_code', { accountId, phone, code });
 });
-sessionManager.on('connected', async ({ accountId, phone }) => {
-  io.emit('wa:connected', { accountId, phone });
+sessionEngine.on('connected', async ({ accountId, phone, reconnected }) => {
+  io.emit('wa:connected', { accountId, phone, reconnected: !!reconnected });
 
   // Auto-warming: if the account has auto_warm=true set, immediately schedule a warming task.
   // This lets operators link a number and have warming start without a second API call.
@@ -197,66 +195,106 @@ sessionManager.on('connected', async ({ accountId, phone }) => {
     logger.warn('Auto-warm check failed (non-critical)', { accountId, error: e.message });
   }
 });
-sessionManager.on('disconnected', (payload) => {
+sessionEngine.on('disconnected', (payload) => {
   io.emit('wa:disconnected', payload);
 });
 
 // Persist incoming/outgoing messages from Baileys + update conversations + broadcast live
-sessionManager.on('messages.upsert', async ({ accountId, messages }) => {
+sessionEngine.on('messages.upsert', async ({ accountId, messages }) => {
   for (const msg of (messages || [])) {
     try {
       const remoteJid = msg.key?.remoteJid;
       if (!remoteJid) continue;
+      // Skip status / broadcast noise
+      if (remoteJid === 'status@broadcast' || remoteJid.endsWith('@broadcast')) continue;
 
-      const isGroup = remoteJid.includes('@g.us');
-      const contactPhone = isGroup ? remoteJid : remoteJid.replace(/@.*/, '');
-      // Groups are now passed through (for group-pull desk + future group chat). Conversation key uses full jid for groups.
+      const peer = extractPeer(msg);
+      // Conversation key: full group JID for groups (keeps group threads together),
+      // else phone digits (or LID digits if no PN yet)
+      const contactPhone = peer.isGroup
+        ? (peer.groupJid || remoteJid)
+        : (peer.phone || remoteJid.replace(/@.*/, ''));
+      let pushName = peer.pushName;
+
+      // Resolve group subject for display (cache in conversation name)
+      if (peer.isGroup) {
+        try {
+          const meta = await sessionEngine.getGroupMetadata(accountId, contactPhone).catch(() => null);
+          if (meta?.subject) pushName = meta.subject;
+        } catch (_) { /* ignore */ }
+      }
+
       const text = msg.message?.conversation ||
                    msg.message?.extendedTextMessage?.text ||
                    (msg.message?.imageMessage ? '[image]' : '') ||
-                   (msg.message?.videoMessage ? '[video]' : '');
+                   (msg.message?.videoMessage ? '[video]' : '') ||
+                   (msg.message?.documentMessage ? '[document]' : '') ||
+                   (msg.message?.audioMessage ? '[audio]' : '');
 
       if (!text) continue;
 
-      const convo = await messagesData.findOrCreateConversation(accountId, contactPhone);
+      // Group threads: conversation name = subject; bubble text shows "Sender: message"
+      let storeText = text;
+      if (peer.isGroup && !msg.key.fromMe && peer.pushName) {
+        storeText = `${peer.pushName}: ${text}`;
+      }
+
+      const convo = await messagesData.findOrCreateConversation(accountId, contactPhone, pushName);
 
       await messagesData.createMessage({
         conversation_id: convo.id,
         ws_account_id: accountId,
         direction: msg.key.fromMe ? 'out' : 'in',
-        text,
+        text: storeText,
         wa_message_id: msg.key?.id,
         timestamp: msg.messageTimestamp ? new Date(Number(msg.messageTimestamp) * 1000) : new Date(),
-        raw: { key: msg.key, message: msg.message },
+        raw: {
+          key: msg.key,
+          message: msg.message,
+          pushName: peer.pushName,
+          groupSubject: peer.isGroup ? pushName : null,
+          peer: { jid: peer.jid, isLid: peer.isLid, displayId: peer.displayId, isGroup: peer.isGroup },
+        },
       });
 
-      // Auto-capture / assign contact (fan) for this WS number on any message
-      try {
-        await db('contacts')
-          .insert({
-            phone: contactPhone,
-            assigned_ws_account_id: accountId,
-            source: msg.key.fromMe ? 'desk_out' : 'inbound',
-            opted_in: true,
-          })
-          .onConflict(['phone', 'assigned_ws_account_id'])
-          .ignore();
-      } catch (e) { /* ignore dups */ }
+      // Auto-capture contact with name when available (skip pure group jids as contact phones)
+      if (!peer.isGroup && contactPhone) {
+        try {
+          const existing = await db('contacts')
+            .where({ phone: contactPhone, assigned_ws_account_id: accountId })
+            .first();
+          if (!existing) {
+            await db('contacts').insert({
+              phone: contactPhone,
+              name: pushName || null,
+              assigned_ws_account_id: accountId,
+              source: msg.key.fromMe ? 'desk_out' : 'inbound',
+              opted_in: true,
+            });
+          } else if (pushName && !existing.name) {
+            await db('contacts').where({ id: existing.id }).update({ name: pushName, updated_at: db.fn.now() });
+          }
+        } catch (e) { /* ignore dups */ }
+      }
 
-      // Broadcast for live desk UI (future: rooms per account)
       io.emit('wa:message', {
         accountId,
         phone: contactPhone,
+        name: pushName || convo.contact_name || null,
+        displayId: peer.displayId,
+        isLid: peer.isLid,
         direction: msg.key.fromMe ? 'out' : 'in',
         text,
         timestamp: msg.messageTimestamp ? Number(msg.messageTimestamp) : Date.now(),
         fromMe: !!msg.key.fromMe,
-        isGroup,
+        isGroup: peer.isGroup,
       });
 
       logger.info('Message persisted + broadcast', {
         accountId,
         phone: contactPhone,
+        name: pushName || null,
+        isLid: peer.isLid,
         direction: msg.key.fromMe ? 'out' : 'in'
       });
     } catch (e) {
@@ -265,16 +303,47 @@ sessionManager.on('messages.upsert', async ({ accountId, messages }) => {
   }
 });
 
-// Graceful shutdown of WA sessions + jobs
-process.on('SIGINT', async () => {
-  logger.info('Shutting down sessions and jobs...');
+// Graceful shutdown — end sockets WITHOUT logout so WhatsApp keeps the linked device
+async function gracefulShutdown(signal) {
+  logger.info(`${signal}: shutting down (keeping WA multi-device links)...`);
   if (warmingWorker) await warmingWorker.close().catch(() => {});
   if (blastWorker) await blastWorker.close().catch(() => {});
   if (groupPullWorker) await groupPullWorker.close().catch(() => {});
+  // Soft stop only — do not logout / clear auth / mark error
   await sessionManager.shutdownAll().catch(() => {});
+  // Keep status as linked in DB for accounts that were linked
+  await db('ws_accounts')
+    .whereIn('status', ['offline', 'error', 'linking'])
+    .whereNotNull('baileys_auth_state')
+    .update({ status: 'linked', updated_at: db.fn.now() })
+    .catch(() => {});
   await closeQueues().catch(() => {});
   process.exit(0);
-});
+}
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+
+// Restore linked sessions after boot so closing the browser does not kill WA links
+setTimeout(async () => {
+  try {
+    const linked = await db('ws_accounts')
+      .whereIn('status', ['linked', 'active'])
+      .whereNotNull('baileys_auth_state')
+      .select('id', 'phone');
+    logger.info(`Restoring ${linked.length} linked session(s)...`);
+    for (const acc of linked) {
+      try {
+        await sessionEngine.connectAccount(acc.id);
+        logger.info(`Restored session ${acc.phone}`);
+      } catch (e) {
+        logger.warn(`Restore failed for ${acc.phone}: ${e.message}`);
+        // Stay linked in DB — transient network should not flip to error
+      }
+    }
+  } catch (e) {
+    logger.warn('Session restore skipped: ' + e.message);
+  }
+}, 2500);
 
 // Socket.io placeholder (will attach real handlers in realtime/ )
 io.on('connection', (socket) => {
@@ -292,12 +361,6 @@ httpServer.listen(port, () => {
   logger.info('   See TASKS.md for the full agent-assignable implementation plan.');
   logger.info('   Progress: Phase 0-3 core + 4 warming + 6.1-6.2 materials+blasts(fan+cold) + 7.1 group-pulls + 8 desk + contacts + live at /');
   logger.info('   Login: supervisor@local / admin123 | UI: http://localhost:3000');
-});
-
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  logger.info('SIGTERM received, shutting down...');
-  httpServer.close(() => process.exit(0));
 });
 
 export { app, io, db };

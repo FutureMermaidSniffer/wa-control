@@ -1,33 +1,45 @@
-import SessionManager from '../../core/sessions/SessionManager.js';
+/**
+ * Sessions API — thin adapters over SessionEngine.
+ * Ops (ports, status labels) live here / in SessionManager connected hooks;
+ * link challenges (QR / pairing) go through the engine facade.
+ */
+import { getSessionEngine, setSessionEngine, SessionEngine } from '../../core/engine/SessionEngine.js';
 import { HandshakeRejectedError } from '../../core/sessions/errors.js';
 import db from '../../db/connection.js';
 import { logger } from '../../utils/logger.js';
 import portsData from '../../data/ports.data.js';
+import { normalizeWaPhone } from '../../utils/phone.js';
 
-// Shared manager instance (initialized by src/index.js and reused)
-let manager;
-
+// Back-compat: getSessionManager returns the underlying transport or engine methods
 export function getSessionManager() {
-  if (!manager) manager = new SessionManager(db);
-  return manager;
+  return getSessionEngine();
 }
 
-// Allow index.js to inject the primary instance
 export function setSessionManager(inst) {
-  manager = inst;
+  // Accept either SessionEngine or raw SessionManager
+  if (inst?.manager) {
+    setSessionEngine(inst);
+  } else if (inst?.startQrLink || inst?.requestPairingCode) {
+    // Raw SessionManager — wrap it
+    const engine = new SessionEngine(db, inst);
+    setSessionEngine(engine);
+  } else {
+    setSessionEngine(inst);
+  }
 }
 
 export async function listSessions(req, res) {
-  const active = getSessionManager().getActiveSessions();
+  const engine = getSessionEngine();
+  const active = engine.getActiveSessions();
   const accounts = await db('ws_accounts')
     .select('id', 'phone', 'status', 'display_name', 'port_id', 'proxy_id')
-    .whereIn('id', active.length ? active : ['00000000-0000-0000-0000-000000000000']); // empty safe
+    .whereIn('id', active.length ? active : ['00000000-0000-0000-0000-000000000000']);
   res.json({ active: active.length, sessions: accounts });
 }
 
 export async function pairingDiagnostics(req, res) {
-  const mgr = getSessionManager();
-  const diagnostics = mgr.getPairingDiagnostics();
+  const engine = getSessionEngine();
+  const diagnostics = engine.getPairingDiagnostics?.() ?? {};
 
   const accounts = await db('ws_accounts')
     .select('id', 'phone', 'status', 'proxy_id', 'acquisition_method', 'updated_at')
@@ -53,10 +65,11 @@ export async function pairingDiagnostics(req, res) {
 }
 
 export async function listPairingCodes(req, res) {
-  // Lightweight visibility endpoint for testing.
-  // Shows current codes + the proxy (if any) assigned to the account.
   const includePending = req.query.includePending === 'true';
-  const codes = getSessionManager().getPairingCodes({ includePending });
+  const engine = getSessionEngine();
+  const codes = engine.getPairingCodes?.({ includePending })
+    ?? engine.getPairingCodes?.()
+    ?? [];
   const enriched = await Promise.all(codes.map(async (c) => {
     const acc = await db('ws_accounts').where({ id: c.accountId }).first();
     let proxy = null;
@@ -71,14 +84,44 @@ export async function listPairingCodes(req, res) {
   res.json({ pending: codes.length, codes: enriched });
 }
 
-/** Digits-only form used for Baileys pairing; keep a leading + for E.164-ish storage when present. */
-function normalizeConnectPhone(raw) {
-  if (raw == null || raw === '') return raw;
-  const s = String(raw).trim();
-  const digits = s.replace(/[^\d]/g, '');
-  if (!digits) return s;
-  // Preserve explicit + prefix for storage/display; otherwise store digits as provided.
-  return s.startsWith('+') ? `+${digits}` : digits;
+/**
+ * OpenWA-style poll: GET latest QR (or pairing challenge) for an account.
+ */
+export async function getQr(req, res, next) {
+  try {
+    const { accountId } = req.params;
+    const acc = await db('ws_accounts').where({ id: accountId }).first();
+    if (!acc) return res.status(404).json({ error: 'Account not found' });
+
+    if (acc.status === 'linked' || acc.status === 'active') {
+      return res.status(400).json({
+        error: 'Session is already linked; no QR needed',
+        status: acc.status,
+      });
+    }
+
+    const challenge = getSessionEngine().getLinkChallenge(accountId);
+    if (!challenge.qrCode && !challenge.qrRaw && !challenge.pairingCode) {
+      return res.status(400).json({
+        error: 'QR code is not ready yet. Start link with POST /sessions/connect linkingMethod=qr_scan, then poll again.',
+        status: challenge.status,
+        accountStatus: acc.status,
+      });
+    }
+
+    res.json({
+      accountId,
+      phone: acc.phone,
+      qrCode: challenge.qrCode || null,
+      qrRaw: challenge.qrRaw || null,
+      pairingCode: challenge.pairingCode || null,
+      mode: challenge.mode,
+      status: challenge.status,
+      ageSeconds: challenge.ageSeconds,
+    });
+  } catch (err) {
+    next(err);
+  }
 }
 
 function pairingFailureHint(handshakeStatus, reason) {
@@ -108,13 +151,21 @@ export async function connectNumber(req, res, next) {
       if (acc) phone = acc.phone;
     }
     if (!phone) return res.status(400).json({ error: 'phone or accountId required' });
-    phone = normalizeConnectPhone(phone);
 
-    // Create or find the account record (match normalized or legacy raw forms)
-    let account = await db('ws_accounts').where({ phone }).first();
-    if (!account && accountId) {
-      account = await db('ws_accounts').where({ id: accountId }).first();
+    // Always digits-only for Baileys pairing (leading + is OK on input — we strip it)
+    let phoneDigits;
+    try {
+      phoneDigits = normalizeWaPhone(phone);
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
     }
+    phone = phoneDigits;
+
+    let account = await db('ws_accounts').where({ phone }).first()
+      || await db('ws_accounts').where({ phone: `+${phone}` }).first()
+      || (accountId ? await db('ws_accounts').where({ id: accountId }).first() : null);
+
+    // Digit-only fallback for legacy messy storage
     if (!account) {
       const digits = String(phone).replace(/[^\d]/g, '');
       account = await db('ws_accounts')
@@ -122,59 +173,50 @@ export async function connectNumber(req, res, next) {
         .first();
     }
 
+    // Heal legacy rows stored with +
+    if (account && account.phone !== phone) {
+      await db('ws_accounts').where({ id: account.id }).update({ phone, updated_at: db.fn.now() });
+      account.phone = phone;
+    }
+
     // Pairing and QR stay separate: pairing only when explicitly requested.
-    // - pairing: usePairingCode / phone_assoc / linkingMethod: pairing_code
-    // - QR: default scan_linked / linkingMethod: qr_scan (no usePairingCode)
     const linkingMethodHint = req.body.linkingMethod;
-    const isPairingCodeFlow = !!(
-      usePairingCode ||
-      acquisitionMethod === 'phone_assoc' ||
-      linkingMethodHint === 'pairing_code'
+    const linkingMethod = linkingMethodHint
+      || (usePairingCode || acquisitionMethod === 'phone_assoc' ? 'pairing_code' : 'qr_scan');
+    const isPairingCodeFlow = (
+      linkingMethod === 'pairing_code'
+      || usePairingCode
+      || acquisitionMethod === 'phone_assoc'
     ) && linkingMethodHint !== 'qr_scan' && linkingMethodHint !== 'scan_code';
+    const isQrFlow = linkingMethod === 'qr_scan' || linkingMethod === 'qr';
 
     if (!account) {
       const insertData = {
         phone,
-        acquisition_method: acquisitionMethod,
-        // Explicit stages for primary vs linking (Rocket style)
-        // primary_registered: primary WhatsApp registered (on phone or in cloud emulator), ready to link companion via Baileys
-        // linking: handshake in progress
-        // linked: successful (maps to active for now)
+        acquisition_method: isQrFlow ? 'scan_linked' : acquisitionMethod,
         status: isPairingCodeFlow ? 'primary_registered' : 'pending_login',
+        port_id: (!isPairingCodeFlow && !isQrFlow && portId) ? portId : null,
+        proxy_id: proxyId || null,
       };
-
-      // Port is still deferred for pairing flows (allocated only on successful 'open').
-      // But we now allow setting proxyId even for pairing code flows so the Baileys
-      // connection during pairing can go through the desired proxy.
-      insertData.port_id = (!isPairingCodeFlow && portId) ? portId : null;
-      insertData.proxy_id = proxyId || null;
 
       const [created] = await db('ws_accounts')
         .insert(insertData)
         .returning('*');
       account = created;
 
-      if (!isPairingCodeFlow && portId) {
+      // Port deferred for QR + pairing (allocate on successful open only)
+      if (!isPairingCodeFlow && !isQrFlow && portId) {
         await portsData.incrementAssigned(portId, 1);
       }
-    } else if (portId && account.port_id !== portId && !isPairingCodeFlow) {
-      // reassign port only for non-cloud flows
+    } else if (portId && account.port_id !== portId && !isPairingCodeFlow && !isQrFlow) {
       if (account.port_id) await portsData.decrementAssigned(account.port_id, 1);
       await db('ws_accounts').where({ id: account.id }).update({ port_id: portId });
       await portsData.incrementAssigned(portId, 1);
       account.port_id = portId;
     }
 
-    // Keep stored phone in sync with normalized form when looked up by accountId / digits.
-    if (account.phone !== phone) {
-      await db('ws_accounts').where({ id: account.id }).update({ phone });
-      account.phone = phone;
-    }
-
-    // IMPORTANT (Rocket style): Proxy is selected/updated at the *linking* step,
-    // not during primary registration. This is when the critical companion_hello
-    // handshake happens.
-    if (isPairingCodeFlow && proxyId !== undefined) {
+    // Proxy at linking time (QR or pairing)
+    if ((isPairingCodeFlow || isQrFlow) && proxyId !== undefined) {
       // Accept null (force direct), or a non-empty string (UUID). The DB FK will reject invalid UUIDs.
       if (proxyId !== null && typeof proxyId !== 'string') {
         return res.status(400).json({ error: 'proxyId must be a UUID string or null' });
@@ -186,29 +228,13 @@ export async function connectNumber(req, res, next) {
       }
     }
 
-    // Proxy assignment at linking time is logged via logger above.
-
-    // For testing non-proxy (direct) linking, caller can pass proxyId: null explicitly.
-    // Auto-proxy: only if a proxyId was explicitly passed in the request OR the account already has one.
-    // Do NOT auto-pick from the proxies table — many proxies in the table may not support
-    // WhatsApp WebSocket (HTTP proxies return 500, SOCKS5 proxies may block WA).
-    // Direct connection works reliably. Proxy should only be applied intentionally.
-    if (isPairingCodeFlow && !account.proxy_id && proxyId === undefined) {
-      logger.info(`[PAIRING-CONNECT] No proxy assigned for ${phone} — using direct connection (recommended for initial link)`);
+    if ((isPairingCodeFlow || isQrFlow) && !account.proxy_id && proxyId === undefined) {
+      logger.info(`[LINK-CONNECT] No proxy for ${phone} — direct (recommended for initial link)`);
     }
 
-    const mgr = getSessionManager();
-
-    // Expose multiple linking paths (at least 2-3) to match observed Rocket flows.
-    // - pairing_code (enter code on primary)
-    // - qr_scan / scan_code — separate QR path
-    // - verification_code (import via code from primary)
-    const linkingMethod = linkingMethodHint
-      || (isPairingCodeFlow ? 'pairing_code' : 'qr_scan');
+    const engine = getSessionEngine();
     logger.info(`[LINKING] Path: ${linkingMethod} for ${phone}`);
 
-    // For non-pairing paths (scan_code, verification_code), just prepare the account for linking
-    // and return instructions. These can be extended to accept a code from primary.
     if (linkingMethod === 'scan_code' || linkingMethod === 'verification_code') {
       await db('ws_accounts').where({ id: account.id }).update({ status: 'linking' });
       return res.json({
@@ -216,21 +242,17 @@ export async function connectNumber(req, res, next) {
         phone,
         status: 'ready_for_' + linkingMethod,
         linkingMethod,
-        instructions: `Provide the ${linkingMethod} from the primary WhatsApp (in cloud). Call again or use dedicated endpoint to consume it.`,
+        instructions: `Provide the ${linkingMethod} from the primary WhatsApp. Call again or use dedicated endpoint to consume it.`,
       });
     }
 
     // Shared flags — declare once so try/catch and QR path never hit TDZ on const.
     const forceNew = !!req.body.forceNew;
-    // Temporary testing flag: forceDirect / noProxy / direct skips proxy for this attempt.
     const forceDirect = !!(req.body.forceDirect || req.body.noProxy || req.body.direct);
 
-    // Support phone-less / cloud / phone-primary flow using pairing code
-    // (enter code directly in WhatsApp app running in your cloud emulator or on your phone as primary)
-    if (linkingMethod === 'pairing_code' || usePairingCode || acquisitionMethod === 'phone_assoc') {
+    // ----- Pairing code path -----
+    if (isPairingCodeFlow) {
       try {
-        // If account status is not ready for pairing, revive it.
-        // Covers: stuck linking, offline, error, pending_login (imported without pairing mode).
         const prevStatus = account.status;
         if (['offline', 'error', 'linking', 'pending_login'].includes(account.status)) {
           await db('ws_accounts').where({ id: account.id }).update({ status: 'primary_registered' });
@@ -239,7 +261,7 @@ export async function connectNumber(req, res, next) {
         }
 
         const proxyInfo = account.proxy_id
-          ? await db('proxies').where({ id: account.proxy_id }).select('id','type','host','port').first()
+          ? await db('proxies').where({ id: account.proxy_id }).select('id', 'type', 'host', 'port').first()
           : null;
 
         if (forceDirect) {
@@ -250,31 +272,38 @@ export async function connectNumber(req, res, next) {
           logger.info(`[PAIRING-CONNECT] No proxy (direct) for ${phone}`);
         }
 
-        // Explicit 'linking' stage for the handshake
         await db('ws_accounts').where({ id: account.id }).update({ status: 'linking' });
 
-        const result = await mgr.requestPairingCode(account.id, phone, { forceNew, forceDirect });
-        const normalized = typeof result === 'string'
-          ? { code: result, handshakeStatus: 'accepted', handshakeWaitMs: 0 }
-          : result;
+        const result = await engine.startLink(account.id, {
+          mode: 'pairing',
+          phone,
+          forceNew,
+          forceDirect,
+        });
+
+        // startLink may return string code (raw manager) or object from engine/handshake
+        const pairingCode = result?.pairingCode ?? result?.code ?? (typeof result === 'string' ? result : null);
+        const handshakeStatus = result?.handshakeStatus;
+        const handshakeWaitMs = result?.handshakeWaitMs;
 
         return res.json({
           accountId: account.id,
           phone: account.phone,
-          pairingCode: normalized.code,
-          handshakeStatus: normalized.handshakeStatus,
-          handshakeWaitMs: normalized.handshakeWaitMs,
+          pairingCode,
+          ...(handshakeStatus ? { handshakeStatus, handshakeWaitMs } : {}),
           status: 'enter_pairing_code',
+          linkingMethod: 'pairing_code',
           proxy: (!forceDirect && proxyInfo)
             ? { id: proxyInfo.id, type: proxyInfo.type, host: proxyInfo.host, port: proxyInfo.port }
             : null,
-          note: 'Proxy shown above (auto-selected if none passed). Watch server logs for the exact "[PAIRING] Creating Baileys socket ..." line.',
-          instructions: 'Server prints big banner. Look for "USING PROXY" or "DIRECT". GET /pairing-codes for live view with proxy.'
+          note: 'Proxy shown above. Watch server logs for "[PAIRING] Creating Baileys socket ...".',
+          instructions:
+            'Enter the code in WhatsApp → Linked Devices → Link with phone number. ' +
+            'GET /sessions/:id/qr and GET /sessions/pairing-codes also show pending codes.',
         });
       } catch (e) {
         if (e instanceof HandshakeRejectedError) {
           const hint = pairingFailureHint(e.handshakeStatus, e.reason);
-          // Re-read proxy after forceDirect may have cleared it mid-attempt
           const usedProxyId = forceDirect ? null : account.proxy_id;
           const usedProxy = usedProxyId
             ? await db('proxies').where({ id: usedProxyId }).select('id', 'type', 'host', 'port', 'status').first()
@@ -306,7 +335,6 @@ export async function connectNumber(req, res, next) {
             ],
           });
         }
-        // Surface proxy-specific errors clearly
         if (e.message && (e.message.includes('proxy') || e.message.includes('NotAllowed') || e.message.includes('Socks5'))) {
           return res.status(400).json({ error: e.message });
         }
@@ -314,69 +342,124 @@ export async function connectNumber(req, res, next) {
       }
     }
 
-    // Traditional QR scan flow (scan with physical or emulator phone)
-
-    if (forceDirect && account.proxy_id) {
-      await db('ws_accounts').where({ id: account.id }).update({ proxy_id: null });
-      account.proxy_id = null;
-      logger.info(`[QR-CONNECT] forceDirect: cleared proxy for ${phone}`);
-    }
-
-    if (forceNew) {
-      await mgr.disconnectAccount(account.id, false).catch(() => {});
-      await db('ws_accounts').where({ id: account.id }).update({
-        baileys_auth_state: null,
-        status: 'pending_login',
-        updated_at: db.fn.now(),
-      });
-      account.status = 'pending_login';
-      logger.info(`[QR-CONNECT] forceNew: fresh socket for ${phone}`);
-    }
-
-    await db('ws_accounts').where({ id: account.id }).update({ status: 'linking' });
-
-    const QR_WAIT_MS = parseInt(process.env.QR_CONNECT_WAIT_MS || '30000', 10);
-
-    const cleanupQrListeners = () => {
-      mgr.off('qr', qrHandler);
-      mgr.off('connected', connectedHandler);
-    };
-
-    const qrHandler = ({ accountId, qr }) => {
-      if (accountId !== account.id || res.headersSent) return;
-      cleanupQrListeners();
-      logger.info(`[QR-CONNECT] QR ready for ${account.phone} (waited <${QR_WAIT_MS}ms)`);
-      res.json({ accountId: account.id, phone: account.phone, qr, status: 'scan_qr' });
-    };
-    mgr.on('qr', qrHandler);
-
-    const connectedHandler = ({ accountId }) => {
-      if (accountId !== account.id) return;
-      cleanupQrListeners();
-      if (!res.headersSent) {
-        res.json({ accountId: account.id, phone: account.phone, status: 'connected' });
-      }
-    };
-    mgr.on('connected', connectedHandler);
-
+    // ----- QR scan path (OpenWA-style: non-blocking; poll GET /qr or listen wa:qr) -----
     try {
-      await mgr.connectAccount(account.id);
-
-      // Baileys often emits QR 1–5s after socket open; 800ms was too short for curl/UI.
-      await new Promise((resolve) => setTimeout(resolve, QR_WAIT_MS));
-      if (!res.headersSent) {
-        logger.warn(`[QR-CONNECT] No QR within ${QR_WAIT_MS}ms for ${account.phone} — socket may still be connecting`);
-        res.json({
+      // Prefer safe reconnect when auth already exists (linked/offline/error with saved state)
+      if (account.baileys_auth_state && !forceNew) {
+        return res.status(409).json({
+          error:
+            'Saved auth exists — use POST /sessions/' + account.id + '/reconnect instead of QR. ' +
+            'Pass forceNew:true only to wipe auth and create a new linked device (risks restrictions).',
           accountId: account.id,
-          phone: account.phone,
-          status: 'awaiting_qr',
-          hint: 'QR not ready yet. Retry, watch Socket.io wa:qr, or check PM2 logs for "QR generated".',
+          status: account.status,
+          has_auth: true,
+          next: 'POST /sessions/' + account.id + '/reconnect',
         });
       }
-      cleanupQrListeners();
+
+      if (forceDirect && account.proxy_id) {
+        await db('ws_accounts').where({ id: account.id }).update({ proxy_id: null });
+        account.proxy_id = null;
+        logger.info(`[QR-CONNECT] forceDirect: cleared proxy for ${phone}`);
+      }
+
+      if (proxyId !== undefined && account.proxy_id !== proxyId) {
+        await db('ws_accounts').where({ id: account.id }).update({ proxy_id: proxyId || null });
+      }
+
+      await engine.startLink(account.id, {
+        mode: 'qr',
+        forceNew,
+        forceDirect,
+      });
+
+      // Non-blocking: return immediately; client polls GET …/qr or uses Socket.io wa:qr
+      return res.status(202).json({
+        accountId: account.id,
+        phone: account.phone,
+        status: 'scan_qr',
+        linkingMethod: 'qr_scan',
+        instructions:
+          'Scan the QR with WhatsApp → Linked Devices → Link a device. ' +
+          'Poll GET /api/v1/sessions/' + account.id + '/qr or listen for Socket.io event wa:qr. ' +
+          'QR rotates every ~20s until linked.',
+      });
     } catch (e) {
-      cleanupQrListeners();
-      throw e;
+      return res.status(400).json({ error: e.message || 'Failed to start QR link' });
+    }
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * Safe reconnect: restore Baileys companion from baileys_auth_state without
+ * requesting a pairing code or QR. Prefer this over /sessions/connect after
+ * the first successful link (physical or cloud primary).
+ */
+export async function reconnectSession(req, res, next) {
+  try {
+    const { accountId } = req.params;
+    const engine = getSessionEngine();
+
+    const acc = await db('ws_accounts').where({ id: accountId }).first();
+    if (!acc) return res.status(404).json({ error: 'Account not found' });
+
+    if (!acc.baileys_auth_state) {
+      return res.status(409).json({
+        error: 'No saved auth state — link once via QR or pairing code first',
+        accountId,
+        phone: acc.phone,
+        status: acc.status,
+        has_auth: false,
+        next: 'POST /sessions/connect with linkingMethod=qr_scan or usePairingCode:true',
+      });
+    }
+
+    if (engine.isSocketLive?.(accountId)) {
+      return res.json({
+        success: true,
+        accountId,
+        phone: acc.phone,
+        status: 'live',
+        reconnected: false,
+        has_auth: true,
+        message: 'Session already live',
+      });
+    }
+
+    try {
+      const result = await engine.reconnectAccount(accountId);
+      return res.json({
+        success: true,
+        accountId: result.accountId,
+        phone: result.phone,
+        status: result.status,
+        reconnected: result.reconnected,
+        has_auth: true,
+        message: result.status === 'live'
+          ? 'Session restored from saved auth'
+          : 'Reconnect started — socket is connecting (listen for wa:connected)',
+      });
+    } catch (e) {
+      if (e.code === 'NO_AUTH') {
+        return res.status(409).json({
+          error: e.message,
+          accountId,
+          phone: acc.phone,
+          has_auth: false,
+          next: 'POST /sessions/connect with linkingMethod=qr_scan or usePairingCode:true',
+        });
+      }
+      logger.error('Reconnect failed', { accountId, phone: acc.phone, error: e.message });
+      // Never clear auth on transient failure
+      return res.status(502).json({
+        error: e.message || 'Reconnect failed',
+        accountId,
+        phone: acc.phone,
+        has_auth: true,
+        hint: 'Auth was kept. Fix network and retry reconnect — do not re-link unless WhatsApp removed the device.',
+      });
     }
   } catch (err) {
     next(err);
@@ -386,8 +469,8 @@ export async function connectNumber(req, res, next) {
 export async function disconnectNumber(req, res, next) {
   try {
     const { accountId } = req.params;
-    const mgr = getSessionManager();
-    await mgr.disconnectAccount(accountId, req.body?.permanent === true);
+    const engine = getSessionEngine();
+    await engine.disconnect(accountId, { permanent: req.body?.permanent === true });
     res.json({ success: true });
   } catch (err) { next(err); }
 }
@@ -396,22 +479,14 @@ export async function sendTestMessage(req, res, next) {
   try {
     const { accountId } = req.params;
     const { to, text = 'Hello from WA Control (raw Baileys session)' } = req.body;
-    const mgr = getSessionManager();
-    const result = await mgr.sendText(accountId, to, text, { delayMs: 800 });
+    const engine = getSessionEngine();
+    const result = await engine.sendText(accountId, to, text, { delayMs: 800 });
     res.json({ success: true, result });
   } catch (err) { next(err); }
 }
 
 /**
  * Mark an account as primary_registered so a pairing code can be requested.
- *
- * Use cases:
- *  1. Phone-primary: the real WhatsApp is already installed + registered on the user's phone.
- *     Call this to tell the system the primary is ready → then call /sessions/connect with
- *     usePairingCode:true and enter the code in the phone's WhatsApp.
- *  2. Reset a stuck 'linking' account without touching the DB manually.
- *
- * Also accepts { status: 'offline' | 'error' } if you want to force another status.
  */
 export async function markRegistered(req, res, next) {
   try {
@@ -425,9 +500,8 @@ export async function markRegistered(req, res, next) {
     const acc = await db('ws_accounts').where({ id: accountId }).first();
     if (!acc) return res.status(404).json({ error: 'Account not found' });
 
-    // Tear down any active socket so the next connect is a clean slate
-    const mgr = getSessionManager();
-    await mgr.disconnectAccount(accountId, false).catch(() => {});
+    const engine = getSessionEngine();
+    await engine.disconnect(accountId, { permanent: false }).catch(() => {});
 
     await db('ws_accounts')
       .where({ id: accountId })
@@ -440,7 +514,7 @@ export async function markRegistered(req, res, next) {
       phone: acc.phone,
       status: targetStatus,
       next: targetStatus === 'primary_registered'
-        ? 'Call POST /api/v1/sessions/connect with { "phone": "' + acc.phone + '", "usePairingCode": true } to get your 8-digit pairing code'
+        ? 'POST /sessions/connect with usePairingCode:true, or linkingMethod:qr_scan for QR'
         : `Account is now ${targetStatus}`,
     });
   } catch (err) { next(err); }

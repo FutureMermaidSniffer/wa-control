@@ -6,10 +6,12 @@ import { Worker } from 'bullmq';
 import { getConnection } from '../queues.js';
 import db from '../../db/connection.js';
 import blastsData from '../../data/blasts.data.js';
-import SessionManager from '../../core/sessions/SessionManager.js';
+import { getSessionEngine } from '../../core/engine/SessionEngine.js';
 import { logger } from '../../utils/logger.js';
 
-const sessionManager = new SessionManager(db);
+const sessionManager = {
+  sendText: (...a) => getSessionEngine().sendText(...a),
+};
 
 const DAILY_CAP = 100; // per number per day safety cap (configurable later)
 

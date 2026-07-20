@@ -5,6 +5,21 @@ wa-control is a backend system for managing multiple WhatsApp accounts using Bai
 
 The system separates **primary registration** (official WA in emulator or phone) from **companion linking** (Baileys session managed by server).
 
+### Two-layer model (SessionEngine vs Ops)
+
+```
+OPS / CONTROL PLANE
+  ports · warehouse · warming · blasts · group pull · materials · desks · MoreLogin
+            │
+            ▼  narrow interface only
+SESSION ENGINE  (src/core/engine/SessionEngine.js → SessionManager)
+  multi-session Baileys · QR + pairing · proxy · auth state · send/receive events
+```
+
+- **Engine** (OpenWA-like simplicity): `startLink({ mode: 'qr'|'pairing' })`, `GET /sessions/:id/qr`, Socket.io `wa:qr` / `wa:pairing_code` / `wa:connected`.
+- **Ops** (Rocket product): port allocation on link success, auto-warm, blast/group workers, CS desk — never implement reconnect/QR themselves.
+- Workers and cloud services call `getSessionEngine()` (shared instance from `src/index.js`), not `new SessionManager()`.
+
 ## Components and Interactions
 
 Use this Mermaid diagram for visual breakdown (copy to Mermaid live editor):

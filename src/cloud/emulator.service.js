@@ -11,12 +11,10 @@
 import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
 import db from '../db/connection.js';
-import SessionManager from '../core/sessions/SessionManager.js';
+import { getSessionEngine } from '../core/engine/SessionEngine.js';
 import { logger } from '../utils/logger.js';
 
 const execAsync = promisify(exec);
-
-const sessionManager = new SessionManager(db);
 
 export class EmulatorService {
   constructor() {
@@ -298,30 +296,25 @@ export class EmulatorService {
     }
 
     try {
-      const result = await sessionManager.requestPairingCode(account.id, account.phone, {
+      const code = await getSessionEngine().requestPairingCode(account.id, account.phone, {
         forceNew: emulator.status === 'error',
       });
-      const { code, handshakeStatus, handshakeWaitMs } = typeof result === 'string'
-        ? { code: result, handshakeStatus: 'accepted', handshakeWaitMs: 0 }
-        : result;
 
       await this.updateEmulator(emulatorId, {
+        status: 'linked',
+        last_linked_at: db.fn.now(),
         metadata: {
           ...emulator.metadata,
           pairing_code_used: code,
-          handshakeStatus,
-          handshakeWaitMs,
+          linked_at: new Date().toISOString(),
         },
       });
 
-      logger.info('Pairing code issued for cloud emulator', { emulatorId, code, handshakeStatus });
+      logger.info('Pairing code issued for cloud emulator', { emulatorId, code });
 
       return {
         success: true,
         pairingCode: code,
-        handshakeStatus,
-        handshakeWaitMs,
-        emulatorStatus: 'linking',
         instructions: 'Enter this code in the WhatsApp app running inside the Waydroid session. Server logs will show huge banner + live reminders of the code. GET /sessions/pairing-codes for visibility. Once linked you can stop the session. Port allocated on open.',
         accountId: account.id,
       };
@@ -452,9 +445,10 @@ export class EmulatorService {
    * Keep the Baileys socket alive while the operator enters the pairing code in WhatsApp.
    */
   waitForLink(accountId, timeoutMs = 180000) {
+    const engine = getSessionEngine();
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
-        sessionManager.pairingInProgress.delete(accountId);
+        engine.manager?.pairingInProgress?.delete?.(accountId);
         cleanup();
         reject(new Error(
           'Timed out waiting for Baileys link. Enter the pairing code on the primary WhatsApp faster, or re-run to get a fresh code.'
@@ -470,10 +464,10 @@ export class EmulatorService {
 
       const cleanup = () => {
         clearTimeout(timeout);
-        sessionManager.off('connected', onConnected);
+        engine.off('connected', onConnected);
       };
 
-      sessionManager.on('connected', onConnected);
+      engine.on('connected', onConnected);
     });
   }
 }
