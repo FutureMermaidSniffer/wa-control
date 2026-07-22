@@ -286,11 +286,18 @@ export async function connectNumber(req, res, next) {
         const handshakeStatus = result?.handshakeStatus;
         const handshakeWaitMs = result?.handshakeWaitMs;
 
+        if (!pairingCode) {
+          logger.warn(`[PAIRING-CONNECT] 200 without pairingCode for ${phone}`, {
+            resultKeys: result && typeof result === 'object' ? Object.keys(result) : typeof result,
+          });
+        }
+
         return res.json({
           accountId: account.id,
           phone: account.phone,
           pairingCode,
-          ...(handshakeStatus ? { handshakeStatus, handshakeWaitMs } : {}),
+          handshakeStatus: handshakeStatus || (pairingCode ? 'accepted' : undefined),
+          ...(handshakeWaitMs != null ? { handshakeWaitMs } : {}),
           status: 'enter_pairing_code',
           linkingMethod: 'pairing_code',
           proxy: (!forceDirect && proxyInfo)
@@ -299,7 +306,8 @@ export async function connectNumber(req, res, next) {
           note: 'Proxy shown above. Watch server logs for "[PAIRING] Creating Baileys socket ...".',
           instructions:
             'Enter the code in WhatsApp → Linked Devices → Link with phone number. ' +
-            'GET /sessions/:id/qr and GET /sessions/pairing-codes also show pending codes.',
+            'If the phone already showed a link request, enter this code immediately. ' +
+            'Already-linked accounts: use Reconnect (no new code) unless WhatsApp removed the device.',
         });
       } catch (e) {
         if (e instanceof HandshakeRejectedError) {

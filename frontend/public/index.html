@@ -149,7 +149,12 @@
     }
     .wa-bubble.in { background: #fff; border-top-left-radius: 0; }
     .wa-bubble.out { background: #d9fdd3; border-top-right-radius: 0; }
-    .wa-bubble-time { font-size: 11px; color: #667781; text-align: right; margin-top: 2px; }
+    .wa-bubble-time { font-size: 11px; color: #667781; text-align: right; margin-top: 2px; display: flex; align-items: center; justify-content: flex-end; gap: 4px; }
+    .wa-bubble-status { font-size: 11px; color: #667781; letter-spacing: -1px; }
+    .wa-bubble-status.failed { color: #dc2626; letter-spacing: 0; font-size: 10px; }
+    .wa-bubble-status.pending { color: #8696a0; }
+    .wa-bubble-status.server_ack, .wa-bubble-status.delivered, .wa-bubble-status.read { color: #53bdeb; }
+    .wa-bubble.failed { opacity: 0.85; border: 1px solid #fca5a5; }
     .wa-composer {
       display: flex; align-items: flex-end; gap: 8px; padding: 10px 12px; background: #f0f2f5;
       border-top: 1px solid #e9edef; flex-shrink: 0; position: relative;
@@ -1027,6 +1032,13 @@
     _pairingContext = { accountId: accountId || null, phone: phone || null };
   }
 
+  /** Open pairing modal + phase-1 UI (used by runPairingConnect). */
+  function openPairingFlow(accountId, phone) {
+    setPairingContext(accountId, phone);
+    renderPairingPhase1(phone);
+    document.getElementById('pairing-modal').classList.add('open');
+  }
+
   function escapeHtml(s) {
     return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
@@ -1193,10 +1205,12 @@
       return null;
     }
 
-    const hs = j.handshakeStatus || 'accepted';
-    if (j.pairingCode && ['accepted', 'accepted_weak'].includes(hs)) {
+    const hs = j.handshakeStatus || (j.pairingCode ? 'accepted' : '');
+    // Show code whenever the API returns one (including accepted_weak).
+    // Rejected/ambiguous 422s are handled above via !res.ok.
+    if (j.pairingCode) {
       renderPairingCodePanel(phone, j.pairingCode, {
-        handshakeStatus: hs,
+        handshakeStatus: hs || 'accepted',
         proxy: j.proxy,
         title: opts.title,
         stepsHtml: opts.stepsHtml,
@@ -1204,7 +1218,7 @@
       });
       navigator.clipboard.writeText(j.pairingCode).catch(() => {});
       const toastMsg = hs === 'accepted_weak'
-        ? 'Pairing code ready (weak handshake — verify phone got prompt)'
+        ? 'Pairing code ready — enter it on the phone now (if you got a link prompt)'
         : 'Pairing code ready';
       showToast(toastMsg, hs === 'accepted_weak' ? 'warn' : 'success', 6000);
       return j;
@@ -1214,8 +1228,11 @@
       renderPairingErrorPanel(j.error, phone);
       showToast(j.error, 'error', 6000);
     } else {
-      renderPairingErrorPanel('No pairing code returned — check server logs', phone);
-      showToast('No pairing code returned', 'error', 6000);
+      renderPairingErrorPanel(
+        'No pairing code returned. If the phone showed a link request, check server logs for the code banner, or retry once. Gate may still be waiting for handshake accept.',
+        phone
+      );
+      showToast('No pairing code in response', 'error', 6000);
     }
     return null;
   }
@@ -2957,20 +2974,64 @@
     deskMarkRead();
   }
 
+  function deliveryStatusLabel(status) {
+    switch (status) {
+      case 'pending':
+      case 'queued': return '◷';
+      case 'server_ack': return '✓';
+      case 'delivered': return '✓✓';
+      case 'read': return '✓✓';
+      case 'failed': return 'Failed';
+      default: return '';
+    }
+  }
+
   function appendBubble(box, m) {
     const row = document.createElement('div');
     row.className = `wa-bubble-row ${m.direction === 'out' ? 'out' : 'in'}`;
+    if (m.wa_message_id) row.dataset.waId = m.wa_message_id;
+    if (m.id) row.dataset.msgId = m.id;
     const bubble = document.createElement('div');
-    bubble.className = `wa-bubble ${m.direction === 'out' ? 'out' : 'in'}`;
+    const failed = m.delivery_status === 'failed' || (m.text || '').startsWith('[FAILED]');
+    bubble.className = `wa-bubble ${m.direction === 'out' ? 'out' : 'in'}${failed ? ' failed' : ''}`;
     const text = document.createElement('div');
+    text.className = 'wa-bubble-text';
     text.textContent = m.text || '[media]';
     const time = document.createElement('div');
     time.className = 'wa-bubble-time';
-    time.textContent = msgTimeLabel(m.timestamp);
+    const timeSpan = document.createElement('span');
+    timeSpan.textContent = msgTimeLabel(m.timestamp);
+    time.appendChild(timeSpan);
+    if (m.direction === 'out') {
+      const st = document.createElement('span');
+      st.className = `wa-bubble-status ${m.delivery_status || 'pending'}`;
+      st.dataset.role = 'status';
+      st.textContent = deliveryStatusLabel(m.delivery_status || 'pending');
+      time.appendChild(st);
+    }
     bubble.appendChild(text);
     bubble.appendChild(time);
     row.appendChild(bubble);
     box.appendChild(row);
+    return row;
+  }
+
+  function updateBubbleStatus(waMessageId, deliveryStatus) {
+    if (!waMessageId) return;
+    const box = document.getElementById('desk-messages');
+    if (!box) return;
+    const row = box.querySelector(`.wa-bubble-row[data-wa-id="${CSS.escape(waMessageId)}"]`);
+    if (!row) return;
+    const st = row.querySelector('[data-role="status"]');
+    const bubble = row.querySelector('.wa-bubble');
+    if (st) {
+      st.className = `wa-bubble-status ${deliveryStatus || ''}`;
+      st.textContent = deliveryStatusLabel(deliveryStatus);
+    }
+    if (bubble) {
+      if (deliveryStatus === 'failed') bubble.classList.add('failed');
+      else bubble.classList.remove('failed');
+    }
   }
 
   async function refreshDeskMessages() {
@@ -3027,10 +3088,15 @@
     } else if (!String(to).includes('@')) {
       to = `${normalizeDeskPhone(to)}@s.whatsapp.net`;
     }
-    // Optimistic bubble
+    // Optimistic bubble (pending until WA server ack)
     const box = document.getElementById('desk-messages');
     if (box.querySelector('.wa-empty')) box.innerHTML = '';
-    appendBubble(box, { direction: 'out', text, timestamp: new Date().toISOString() });
+    const row = appendBubble(box, {
+      direction: 'out',
+      text,
+      timestamp: new Date().toISOString(),
+      delivery_status: 'pending',
+    });
     box.scrollTop = box.scrollHeight;
     input.value = '';
     const res = await fetch(API + `/accounts/${currentDeskAccount}/send`, {
@@ -3038,8 +3104,29 @@
       body: JSON.stringify({ to, text })
     });
     const j = await res.json().catch(() => ({}));
-    if (!res.ok && res.status !== 202) showToast(j.error || 'Send failed', 'error');
-    else if (j.error) showToast('Stored; send failed: ' + j.error, 'error');
+    if (j.wa_message_id && row) row.dataset.waId = j.wa_message_id;
+    if (j.messageId && row) row.dataset.msgId = j.messageId;
+    if (!res.ok) {
+      const hint = j.hint || (j.code === 'WA_ACK_463'
+        ? 'WhatsApp reach-out lock — message not accepted for immediate delivery'
+        : 'session may be offline; use Reconnect');
+      showToast((j.error || 'Send failed') + ' — ' + hint, 'error', 9000);
+      const lastText = row?.querySelector('.wa-bubble-text');
+      if (lastText && !String(lastText.textContent).startsWith('[FAILED]')) {
+        /* keep original text; show status failed */
+      }
+      updateBubbleStatus(j.wa_message_id || row?.dataset?.waId, 'failed');
+      const st = row?.querySelector('[data-role="status"]');
+      if (st) {
+        st.className = 'wa-bubble-status failed';
+        st.textContent = j.code === 'WA_ACK_463' ? 'Blocked' : 'Failed';
+      }
+      row?.querySelector('.wa-bubble')?.classList.add('failed');
+    } else {
+      const st = j.delivery_status || 'server_ack';
+      updateBubbleStatus(j.wa_message_id, st);
+      showToast(st === 'delivered' ? 'Delivered' : 'Sent to WhatsApp', 'success', 1500);
+    }
     setTimeout(() => loadDeskConversations(), 500);
   }
 
@@ -3118,15 +3205,32 @@
         if (currentDeskAccount === data.accountId && currentDeskPhone === data.phone) {
           const box = document.getElementById('desk-messages');
           if (box) {
+            // Avoid duplicate bubble if we already have this WA id (desk send + upsert echo)
+            if (data.wa_message_id && box.querySelector(`.wa-bubble-row[data-wa-id="${CSS.escape(data.wa_message_id)}"]`)) {
+              updateBubbleStatus(data.wa_message_id, data.delivery_status || 'server_ack');
+              return;
+            }
             if (box.querySelector('.wa-empty')) box.innerHTML = '';
             appendBubble(box, {
               direction: data.direction,
               text: data.text,
+              wa_message_id: data.wa_message_id,
+              delivery_status: data.delivery_status || (data.direction === 'out' ? 'server_ack' : null),
               timestamp: data.timestamp ? new Date(Number(data.timestamp) * 1000 || data.timestamp).toISOString() : new Date().toISOString(),
             });
             box.scrollTop = box.scrollHeight;
           }
         } else if (deskVisible) loadDeskConversations();
+      });
+      liveSocket.on('wa:message_status', (data) => {
+        if (!data?.wa_message_id) return;
+        if (currentDeskAccount && data.accountId && data.accountId !== currentDeskAccount) return;
+        updateBubbleStatus(data.wa_message_id, data.delivery_status);
+        if (data.failed) {
+          showToast(data.errorCode === '463'
+            ? 'Delivery blocked by WhatsApp (reach-out lock 463)'
+            : 'Message delivery failed', 'error', 6000);
+        }
       });
       liveSocket.on('wa:qr', ({ phone, qr, accountId }) => {
         // Only update the modal when the user started an explicit QR flow.

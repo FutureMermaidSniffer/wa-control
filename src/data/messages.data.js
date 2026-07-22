@@ -25,6 +25,19 @@ export async function findOrCreateConversation(wsAccountId, contactPhone, contac
   return convo;
 }
 
+/**
+ * Cache the JIDs WhatsApp used for this peer (from inbound).
+ * Enables instant correct outbound addressing without heavy history scans.
+ */
+export async function updateConversationPeerJids(convoId, { remoteJid, phoneJid } = {}) {
+  if (!convoId) return;
+  const patch = { peer_jid_updated_at: db.fn.now(), updated_at: db.fn.now() };
+  if (remoteJid) patch.peer_remote_jid = remoteJid;
+  if (phoneJid) patch.peer_phone_jid = phoneJid;
+  if (!remoteJid && !phoneJid) return;
+  await db('conversations').where({ id: convoId }).update(patch);
+}
+
 export async function updateConversationLastMessage(convoId, timestamp = null) {
   await db('conversations')
     .where({ id: convoId })
@@ -74,18 +87,63 @@ export async function getConversation(id) {
 }
 
 export async function createMessage(data) {
-  const [msg] = await db('messages')
-    .insert({
-      conversation_id: data.conversation_id,
-      ws_account_id: data.ws_account_id,
-      direction: data.direction,
-      text: data.text,
-      media: data.media || null,
-      wa_message_id: data.wa_message_id || null,
-      timestamp: data.timestamp || db.fn.now(),
-      raw: data.raw || null,
-    })
-    .returning('*');
+  const insertRow = {
+    conversation_id: data.conversation_id,
+    ws_account_id: data.ws_account_id,
+    direction: data.direction,
+    text: data.text,
+    media: data.media || null,
+    wa_message_id: data.wa_message_id || null,
+    timestamp: data.timestamp || db.fn.now(),
+    raw: data.raw || null,
+    delivery_status: data.delivery_status || (data.direction === 'out' ? 'pending' : null),
+    fail_reason: data.fail_reason || null,
+    wa_status: data.wa_status ?? null,
+  };
+
+  // Dedup: if same WA id already stored (desk insert + Baileys upsert), update not double-insert
+  if (insertRow.wa_message_id && insertRow.ws_account_id) {
+    const existing = await db('messages')
+      .where({
+        ws_account_id: insertRow.ws_account_id,
+        wa_message_id: insertRow.wa_message_id,
+      })
+      .first();
+    if (existing) {
+      const patch = {
+        text: insertRow.text || existing.text,
+        raw: insertRow.raw || existing.raw,
+        updated_at: db.fn.now(),
+      };
+      if (insertRow.delivery_status) patch.delivery_status = insertRow.delivery_status;
+      if (insertRow.fail_reason != null) patch.fail_reason = insertRow.fail_reason;
+      if (insertRow.wa_status != null) patch.wa_status = insertRow.wa_status;
+      const [updated] = await db('messages')
+        .where({ id: existing.id })
+        .update(patch)
+        .returning('*');
+      await updateConversationLastMessage(existing.conversation_id, insertRow.timestamp);
+      return updated || existing;
+    }
+  }
+
+  let msg;
+  try {
+    [msg] = await db('messages')
+      .insert(insertRow)
+      .returning('*');
+  } catch (e) {
+    // Race with concurrent upsert of same wa_message_id
+    if (insertRow.wa_message_id && /unique|duplicate/i.test(e.message || '')) {
+      return updateMessageDeliveryByWaId(insertRow.ws_account_id, insertRow.wa_message_id, {
+        deliveryStatus: insertRow.delivery_status,
+        failReason: insertRow.fail_reason,
+        waStatus: insertRow.wa_status,
+        rawPatch: insertRow.raw,
+      });
+    }
+    throw e;
+  }
 
   // bump last message + unread if inbound
   await updateConversationLastMessage(data.conversation_id, data.timestamp);
@@ -98,6 +156,47 @@ export async function createMessage(data) {
   }
 
   return msg;
+}
+
+/**
+ * Update delivery lifecycle for an outbound message by WhatsApp message id.
+ * @returns {object|null} updated row
+ */
+export async function updateMessageDeliveryByWaId(wsAccountId, waMessageId, {
+  deliveryStatus,
+  failReason = null,
+  waStatus = null,
+  rawPatch = null,
+} = {}) {
+  if (!wsAccountId || !waMessageId) return null;
+  const row = await db('messages')
+    .where({ ws_account_id: wsAccountId, wa_message_id: waMessageId })
+    .first();
+  if (!row) return null;
+
+  const patch = { updated_at: db.fn.now() };
+  if (deliveryStatus) patch.delivery_status = deliveryStatus;
+  if (failReason != null) patch.fail_reason = failReason;
+  if (waStatus != null) patch.wa_status = waStatus;
+  if (rawPatch && typeof rawPatch === 'object') {
+    patch.raw = { ...(row.raw || {}), ...rawPatch };
+  }
+
+  // Never downgrade a stronger status (delivered/read) to weaker, except failed
+  const rank = { pending: 0, queued: 1, server_ack: 2, delivered: 3, read: 4, failed: -1 };
+  if (
+    deliveryStatus &&
+    deliveryStatus !== 'failed' &&
+    row.delivery_status &&
+    rank[row.delivery_status] != null &&
+    rank[deliveryStatus] != null &&
+    rank[deliveryStatus] < rank[row.delivery_status]
+  ) {
+    delete patch.delivery_status;
+  }
+
+  const [updated] = await db('messages').where({ id: row.id }).update(patch).returning('*');
+  return updated || row;
 }
 
 export async function listMessages(convoId, limit = 50) {
@@ -115,9 +214,11 @@ export async function markConversationRead(convoId) {
 
 export default {
   findOrCreateConversation,
+  updateConversationPeerJids,
   listConversationsForAccount,
   getConversation,
   createMessage,
+  updateMessageDeliveryByWaId,
   listMessages,
   markConversationRead,
   updateConversationLastMessage,

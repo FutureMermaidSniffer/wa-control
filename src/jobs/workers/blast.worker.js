@@ -51,7 +51,13 @@ export function startBlastWorker() {
 
           // Send via live session
           const toJid = recip.phone.includes('@') ? recip.phone : `${recip.phone}@s.whatsapp.net`;
-          await sessionManager.sendText(recip.ws_account_id, toJid, campaign.message_template, { delayMs: 800 + Math.random() * 1500 });
+          await sessionManager.sendText(recip.ws_account_id, toJid, campaign.message_template, {
+            delayMs: 800 + Math.random() * 1500,
+            // Mark failed on 463; do not pretend success. Slightly looser timeout for bulk.
+            requirePositiveAck: true,
+            ackTimeoutMs: 6000,
+            prepPresence: true,
+          });
 
           await blastsData.updateRecipient(recip.id, {
             status: 'sent',

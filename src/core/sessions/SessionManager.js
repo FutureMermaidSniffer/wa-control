@@ -27,6 +27,8 @@ import makeWASocket, {
   initAuthCreds,
   BufferJSON,
   makeCacheableSignalKeyStore,
+  generateMessageIDV2,
+  WAMessageStatus,
 } from '@whiskeysockets/baileys';
 import { proto } from '@whiskeysockets/baileys/WAProto/index.js';
 import portsData from '../../data/ports.data.js';
@@ -186,6 +188,8 @@ export class SessionManager extends EventEmitter {
     this._handshakeInFlight = new Map();
     /** Accounts where reconnect must not run after a failed pairing handshake (stops QR spam / 401 loops). */
     this._suppressReconnect = new Set();
+    /** Consecutive non-pairing close failures (403 storms) — capped then cooldown */
+    this._sessionFailCounts = new Map();
   }
 
   _clearReconnectTimer(accountId) {
@@ -207,26 +211,60 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * Get a live socket for an account. Creates/connects if necessary.
-   * Single-flight: concurrent callers share one create promise (avoids conflict/replaced).
+   * Wait until Baileys reports connection open (or timeout).
    * @param {string} accountId
+   * @param {number} [timeoutMs]
+   */
+  async _waitForSocketOpen(accountId, timeoutMs = 45000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const entry = activeSockets.get(accountId);
+      if (entry?.sock?.ws?.isOpen && !entry.dead) return entry.sock;
+      if (entry?.dead) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    if (this.isSocketLive(accountId)) return activeSockets.get(accountId).sock;
+    throw new Error(
+      `Session for ${accountId} did not open within ${timeoutMs}ms — reconnect or re-link required`
+    );
+  }
+
+  /**
+   * Get a live (ws open) socket for an account. Creates/connects if necessary.
+   * Never returns a half-dead / mid-close socket for callers that need messaging.
+   * Single-flight: concurrent callers share one create promise.
+   * @param {string} accountId
+   * @param {{ waitOpen?: boolean, openTimeoutMs?: number }} [opts]
    * @returns {Promise<any>} the Baileys socket
    */
-  async getOrCreateSocket(accountId) {
+  async getOrCreateSocket(accountId, opts = {}) {
+    const waitOpen = opts.waitOpen !== false;
+    const openTimeoutMs = opts.openTimeoutMs ?? 45000;
+
     if (activeSockets.has(accountId)) {
       const entry = activeSockets.get(accountId);
-      // Prefer fully open sockets; also reuse if still connecting (ws exists)
-      if (entry.sock?.ws?.isOpen) return entry.sock;
-      if (entry.sock && !entry.dead) {
-        // Socket mid-handshake — return it rather than spawning a second one
-        return entry.sock;
+      if (entry.sock?.ws?.isOpen && !entry.dead) return entry.sock;
+      // Mid-handshake: wait for open instead of handing back a closed/closing sock
+      if (entry.sock && !entry.dead && waitOpen) {
+        try {
+          return await this._waitForSocketOpen(accountId, openTimeoutMs);
+        } catch {
+          this._endSocketQuietly(entry.sock);
+          activeSockets.delete(accountId);
+        }
+      } else {
+        this._endSocketQuietly(entry.sock);
+        activeSockets.delete(accountId);
       }
-      this._endSocketQuietly(entry.sock);
-      activeSockets.delete(accountId);
     }
 
     if (this._connectingLocks.has(accountId)) {
-      return this._connectingLocks.get(accountId);
+      const sock = await this._connectingLocks.get(accountId);
+      if (waitOpen && sock && !sock.ws?.isOpen) {
+        return this._waitForSocketOpen(accountId, openTimeoutMs);
+      }
+      if (sock?.ws?.isOpen) return sock;
+      // fall through to recreate
     }
 
     const createPromise = (async () => {
@@ -237,7 +275,7 @@ export class SessionManager extends EventEmitter {
         // Kill any stale entry that appeared during await races
         if (activeSockets.has(accountId)) {
           const existing = activeSockets.get(accountId);
-          if (existing.sock?.ws?.isOpen) return existing.sock;
+          if (existing.sock?.ws?.isOpen && !existing.dead) return existing.sock;
           this._endSocketQuietly(existing.sock);
           activeSockets.delete(accountId);
         }
@@ -256,6 +294,9 @@ export class SessionManager extends EventEmitter {
         this._socketGeneration.set(accountId, gen);
         const sock = await this._createSocketForAccount(account, proxy, gen);
         activeSockets.set(accountId, { sock, account, proxy, dead: false, gen });
+        if (waitOpen && !sock?.ws?.isOpen) {
+          return this._waitForSocketOpen(accountId, openTimeoutMs);
+        }
         return sock;
       } finally {
         this._connectingLocks.delete(accountId);
@@ -289,6 +330,22 @@ export class SessionManager extends EventEmitter {
       ? Browsers.macOS('Chrome')
       : DEFAULT_BROWSER;
 
+    // In-memory recent messages for Baileys getMessage (retries / "taking a while")
+    if (!this._msgCache) this._msgCache = new Map(); // accountId -> Map(msgId -> content)
+    const accountMsgCache = (() => {
+      if (!this._msgCache.has(account.id)) this._msgCache.set(account.id, new Map());
+      return this._msgCache.get(account.id);
+    })();
+    const cacheMessage = (key, content) => {
+      if (!key?.id || !content) return;
+      accountMsgCache.set(key.id, content);
+      // Cap per-account cache
+      if (accountMsgCache.size > 500) {
+        const first = accountMsgCache.keys().next().value;
+        accountMsgCache.delete(first);
+      }
+    };
+
     const socketConfig = {
       version,
       auth: state,
@@ -299,9 +356,25 @@ export class SessionManager extends EventEmitter {
       logger: baileysLogger.child({ account: account.phone }),
       connectTimeoutMs: 60_000,
       defaultQueryTimeoutMs: 60_000,
-      markOnlineOnConnect: false,
+      markOnlineOnConnect: true,
       // Avoid heavy full history sync on every reconnect (reduces init-query timeouts under flap)
       syncFullHistory: false,
+      // Required so failed deliveries can be retried (reduces "message can take a while" / bad acks)
+      getMessage: async (key) => {
+        if (!key?.id) return undefined;
+        const cached = accountMsgCache.get(key.id);
+        if (cached) return cached;
+        try {
+          const row = await this.db('messages')
+            .where({ ws_account_id: account.id, wa_message_id: key.id })
+            .first();
+          if (row?.raw?.message) return row.raw.message;
+          if (row?.text && !String(row.text).startsWith('[FAILED]')) {
+            return { conversation: row.text };
+          }
+        } catch { /* ignore */ }
+        return undefined;
+      },
       ...this._buildNetworkAgents(effectiveProxyRow),
     };
 
@@ -370,6 +443,7 @@ export class SessionManager extends EventEmitter {
 
         this._clearReconnectTimer(account.id);
         this._stopReconnect.delete(account.id);
+        this._sessionFailCounts.set(account.id, 0);
 
         const wasQrLink = this.qrLinkInProgress.has(account.id);
         const wasPairing = this.pairingInProgress.has(account.id);
@@ -518,6 +592,43 @@ export class SessionManager extends EventEmitter {
         // Schedule single reconnect (cancel previous timer first)
         let delay = this._getBackoff(account.id);
 
+        // Cap non-pairing reconnect storms (e.g. endless 403 loops)
+        if (!awaitingPairing) {
+          const fails = (this._sessionFailCounts.get(account.id) || 0) + 1;
+          this._sessionFailCounts.set(account.id, fails);
+          const MAX_FAILS = parseInt(process.env.SESSION_RECONNECT_MAX_FAILS || '12', 10);
+          const COOLDOWN_MS = parseInt(process.env.SESSION_RECONNECT_COOLDOWN_MS || String(15 * 60 * 1000), 10);
+          if (fails === 1 || fails % 5 === 0) {
+            logger.warn(
+              `[SESSION] ${account.phone} close #${fails} statusCode=${statusCode ?? 'n/a'} ` +
+              `data=${data ? JSON.stringify(data) : 'n/a'}`
+            );
+          }
+          if (fails > MAX_FAILS) {
+            logger.error(
+              `[SESSION] ${account.phone} exceeded ${MAX_FAILS} reconnect failures ` +
+              `(last statusCode=${statusCode ?? 'n/a'}) — pausing ${Math.round(COOLDOWN_MS / 60000)}min. ` +
+              `Use Reconnect later or re-link if WhatsApp removed the device.`
+            );
+            this._sessionFailCounts.set(account.id, 0);
+            this._clearReconnectTimer(account.id);
+            // Long pause then allow one more cycle
+            const coolTimer = setTimeout(() => {
+              this._reconnectTimers.delete(account.id);
+              if (this._stopReconnect.has(account.id)) return;
+              this.getOrCreateSocket(account.id, { waitOpen: false }).catch((e) =>
+                logger.error(`Cooldown-down reconnect failed for ${account.phone}`, e)
+              );
+            }, COOLDOWN_MS);
+            this._reconnectTimers.set(account.id, coolTimer);
+            return;
+          }
+          // Back off harder on 403 (forbidden / bad session path)
+          if (statusCode === 403) {
+            delay = Math.max(delay, 20_000 + Math.min(fails, 10) * 5_000);
+          }
+        }
+
         if (isConflict) {
           // Another socket stole the session (often ourselves). Back off hard.
           delay = Math.max(delay, 15_000);
@@ -558,17 +669,17 @@ export class SessionManager extends EventEmitter {
           this._reconnectTimers.delete(account.id);
           // Bail if another socket already came up
           const cur = activeSockets.get(account.id);
-          if (cur?.sock?.ws?.isOpen) {
+          if (cur?.sock?.ws?.isOpen && !cur.dead) {
             logger.info(`Skip reconnect for ${account.phone} — already open`);
+            this._sessionFailCounts.set(account.id, 0);
             return;
           }
           if (this._stopReconnect.has(account.id)) return;
 
-          this.getOrCreateSocket(account.id).catch((e) =>
+          this.getOrCreateSocket(account.id, { waitOpen: false }).catch((e) =>
             logger.error(`Reconnect failed for ${account.phone}`, e)
           ).then(() => {
             // Do NOT auto forceNew pairing code while user may still be typing the current code.
-            // Auto-refresh invalidated codes and caused "get a new code" on the phone.
             if (
               this.pairingInProgress.has(account.id)
               && reason.includes('Connection Failure')
@@ -577,8 +688,7 @@ export class SessionManager extends EventEmitter {
               const p = this.pairingInProgress.get(account.id);
               logger.warn(
                 `[PAIRING] Connection Failure while pairing ${account.phone}. ` +
-                `Keeping code ${p?.code || '(none)'} — do not request a new code unless operator clicks Link again. ` +
-                `If phone says "check number or get new code", verify digits match ${p?.phone || account.phone} (country code, no leading 0).`
+                `Keeping code ${p?.code || '(none)'} — do not request a new code unless operator clicks Link again.`
               );
             }
           });
@@ -596,13 +706,277 @@ export class SessionManager extends EventEmitter {
     sock.ev.on('messages.upsert', (m) => {
       if (!isCurrentGen()) return;
       if (m.type === 'notify' || m.type === 'append') {
+        for (const msg of m.messages || []) {
+          if (msg?.key?.id && msg.message) cacheMessage(msg.key, msg.message);
+        }
         this.emit('messages.upsert', { accountId: account.id, messages: m.messages });
+      }
+    });
+
+    // Surface WA delivery acks/nacks (e.g. 463 reach-out lock) — resolve send waiters + emit status
+    sock.ev.on('messages.update', (updates) => {
+      if (!isCurrentGen()) return;
+      for (const u of updates || []) {
+        const stub = u.update?.messageStubParameters;
+        const status = u.update?.status;
+        const id = u.key?.id;
+        const remoteJid = u.key?.remoteJid;
+        const stubStrs = Array.isArray(stub) ? stub.map((s) => String(s)) : [];
+        const errCode = stubStrs.find((s) => s === '463' || /463/.test(s)) || null;
+        const isError = status === WAMessageStatus.ERROR || status === 0 || !!errCode;
+
+        if (stubStrs.length || isError || (status != null && status >= WAMessageStatus.SERVER_ACK)) {
+          logger[isError ? 'warn' : 'info']('[SEND-ACK]', {
+            accountId: account.id,
+            phone: account.phone,
+            id,
+            remoteJid,
+            status,
+            stub: stubStrs,
+          });
+        }
+
+        // Always fan out status for desk ticks / DB (even without a waiter)
+        if (id) {
+          this.emit('message.status', {
+            accountId: account.id,
+            waMessageId: id,
+            remoteJid,
+            status: status ?? null,
+            errorCode: errCode || (isError ? String(status) : null),
+            failed: isError,
+          });
+        }
+
+        if (id && this._sendAckWaiters?.has(id)) {
+          const waiter = this._sendAckWaiters.get(id);
+          if (errCode || (isError && stubStrs.some((s) => s.includes('463')))) {
+            const e = new Error(
+              `WhatsApp rejected delivery (ack 463 / reach-out locked) to ${remoteJid || 'peer'}. ` +
+              `Message was NOT accepted for immediate delivery — contact may receive it much later or never.`
+            );
+            e.code = 'WA_ACK_463';
+            e.waStatus = status;
+            e.remoteJid = remoteJid;
+            waiter.reject(e);
+          } else if (isError) {
+            const e = new Error(
+              `WhatsApp delivery error (status=${status}, stub=${stubStrs.join(',') || 'none'}) to ${remoteJid || 'peer'}`
+            );
+            e.code = 'WA_ACK_ERROR';
+            e.waStatus = status;
+            e.remoteJid = remoteJid;
+            waiter.reject(e);
+          } else if (status != null && status >= WAMessageStatus.SERVER_ACK) {
+            // SERVER_ACK (2) / DELIVERY_ACK (3) / READ (4) — real acceptance
+            waiter.resolve({ status, remoteJid });
+          } else if (status === WAMessageStatus.PENDING) {
+            // PENDING (1) — still in flight; keep waiting for SERVER_ACK or nack
+          }
+        }
       }
     });
 
     // You can add more: groups.update, presence.update, etc. as needed by group pulls / desk / warming
 
     return sock;
+  }
+
+  /**
+   * Wait for delivery ack or 463 nack.
+   * IMPORTANT: call this (register waiter) BEFORE sendMessage — WA often nacks within ~100ms.
+   *
+   * @param {string} msgId
+   * @param {number} [timeoutMs]
+   * @param {{ requirePositiveAck?: boolean }} [opts]
+   *   requirePositiveAck (default true): timeout without SERVER_ACK+ rejects.
+   *   If false, timeout resolves as timeout_ok (legacy blast/warming leniency).
+   */
+  _waitForSendAck(msgId, timeoutMs = 8000, opts = {}) {
+    const requirePositiveAck = opts.requirePositiveAck !== false;
+    if (!msgId) {
+      if (requirePositiveAck) {
+        const e = new Error('No WhatsApp message id — cannot confirm delivery');
+        e.code = 'WA_NO_MSG_ID';
+        return Promise.reject(e);
+      }
+      return Promise.resolve({ status: 'no_id' });
+    }
+    if (!this._sendAckWaiters) this._sendAckWaiters = new Map();
+
+    // If a prior early nack was buffered, consume it
+    if (this._earlyAckErrors?.has(msgId)) {
+      const early = this._earlyAckErrors.get(msgId);
+      this._earlyAckErrors.delete(msgId);
+      return Promise.reject(early);
+    }
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this._sendAckWaiters.delete(msgId);
+        if (requirePositiveAck) {
+          const e = new Error(
+            `No WhatsApp server ack within ${timeoutMs}ms — message not confirmed delivered. ` +
+            `Do not treat as sent (possible reach-out lock or offline session).`
+          );
+          e.code = 'WA_ACK_TIMEOUT';
+          reject(e);
+        } else {
+          // Legacy leniency for non-desk jobs that opt out
+          resolve({ status: 'timeout_ok' });
+        }
+      }, timeoutMs);
+      this._sendAckWaiters.set(msgId, {
+        resolve: (v) => { clearTimeout(timer); this._sendAckWaiters.delete(msgId); resolve(v); },
+        reject: (e) => { clearTimeout(timer); this._sendAckWaiters.delete(msgId); reject(e); },
+      });
+    });
+  }
+
+  /**
+   * Resolve the best chat JID for sending.
+   * Modern WA: if contact has a LID mapping, send to @lid or WA returns async error 463 on PN.
+   * @see https://github.com/WhiskeySockets/Baileys/issues/2683
+   */
+  async _resolveSendJid(sock, accountId, to) {
+    let jid = String(to || '').trim();
+    if (!jid) throw new Error('send target required');
+
+    let pnJid = null;
+    let lidJid = null;
+
+    if (jid.includes('@')) {
+      if (jid.endsWith('@g.us') || jid.endsWith('@broadcast')) return jid;
+      if (jid.endsWith('@lid')) {
+        lidJid = jid;
+      } else if (jid.endsWith('@s.whatsapp.net') || jid.endsWith('@c.us')) {
+        const [user, server] = jid.split('@');
+        const digits = normalizeWaPhone(user, { throwOnInvalid: false, requireCountry: false });
+        pnJid = `${digits}@${server}`;
+      } else {
+        return jid;
+      }
+    } else {
+      const digits = normalizeWaPhone(jid, { throwOnInvalid: false, requireCountry: false });
+      if (digits.length >= 15) lidJid = `${digits}@lid`;
+      else pnJid = `${digits}@s.whatsapp.net`;
+    }
+
+    const phoneKey = (pnJid || lidJid || jid).replace(/@.*/, '').replace(/:\d+$/, '');
+
+    // Fast path: conversation peer cache filled on inbound (mirrors receive path JID)
+    try {
+      const convo = await this.db('conversations')
+        .where({ ws_account_id: accountId })
+        .where(function () {
+          this.where({ contact_phone: phoneKey });
+          if (pnJid) this.orWhere({ peer_phone_jid: pnJid });
+          if (lidJid) this.orWhere({ peer_remote_jid: lidJid });
+        })
+        .first();
+      if (convo?.peer_remote_jid && String(convo.peer_remote_jid).endsWith('@lid')) {
+        lidJid = convo.peer_remote_jid;
+        logger.info(`[SEND] convo cache LID: ${lidJid}`);
+      }
+      if (convo?.peer_phone_jid && String(convo.peer_phone_jid).includes('@')) {
+        pnJid = convo.peer_phone_jid;
+      }
+      // If cache already has a solid LID, skip heavy history / USync
+      if (lidJid && convo?.peer_remote_jid === lidJid) {
+        try {
+          if (typeof sock.assertSessions === 'function') {
+            await sock.assertSessions([lidJid], true);
+          }
+        } catch (e) {
+          logger.warn(`[SEND] assertSessions(${lidJid}): ${e.message}`);
+        }
+        logger.info(`[SEND] using cached LID ${lidJid}${pnJid ? ` (PN ${pnJid})` : ''}`);
+        return lidJid;
+      }
+    } catch (e) {
+      // peer_* columns may be missing pre-migration
+      logger.debug(`[SEND] convo cache lookup skipped: ${e.message}`);
+    }
+
+    // History: inbound chats use remoteJid=@lid + senderPn=@s.whatsapp.net
+    try {
+      const recent = await this.db('messages')
+        .where({ ws_account_id: accountId, direction: 'in' })
+        .where(function () {
+          this.whereRaw(`raw->'peer'->>'phone' = ?`, [phoneKey])
+            .orWhereRaw(`raw->'key'->>'senderPn' like ?`, [`${phoneKey}@%`])
+            .orWhereRaw(`raw->'key'->>'remoteJid' like ?`, [`%${phoneKey}%`])
+            .orWhereRaw(`raw->'peer'->>'jid' like ?`, [`%${phoneKey}%`]);
+        })
+        .orderBy('timestamp', 'desc')
+        .first();
+
+      const remote = recent?.raw?.key?.remoteJid;
+      const senderPn = recent?.raw?.key?.senderPn || recent?.raw?.key?.remoteJidAlt;
+      if (remote && String(remote).endsWith('@lid')) {
+        lidJid = remote;
+        logger.info(`[SEND] history LID for peer: ${lidJid}`);
+      }
+      if (senderPn && (String(senderPn).includes('@s.whatsapp.net') || String(senderPn).includes('@c.us'))) {
+        pnJid = senderPn;
+      }
+    } catch (e) {
+      logger.warn(`[SEND] peer jid lookup failed: ${e.message}`);
+    }
+
+    // Baileys internal LID map if present
+    try {
+      const pnUser = (pnJid || '').split('@')[0];
+      const lidMap = sock?.signalRepository?.lidMapping;
+      if (pnUser && lidMap?.getLIDForPN) {
+        const mapped = await lidMap.getLIDForPN(pnUser);
+        if (mapped) {
+          lidJid = String(mapped).includes('@') ? mapped : `${mapped}@lid`;
+          logger.info(`[SEND] lidMapping.getLIDForPN(${pnUser}) → ${lidJid}`);
+        }
+      }
+    } catch (e) {
+      logger.warn(`[SEND] lidMapping lookup failed: ${e.message}`);
+    }
+
+    // CRITICAL: prefer LID when known (avoids async 463 on PN-only send)
+    if (lidJid) {
+      jid = lidJid;
+      logger.info(`[SEND] using LID ${lidJid}${pnJid ? ` (PN ${pnJid})` : ''}`);
+    } else if (pnJid) {
+      jid = pnJid;
+      // onWhatsApp only for PN destinations
+      try {
+        if (typeof sock.onWhatsApp === 'function') {
+          const digits = pnJid.split('@')[0];
+          const results = await sock.onWhatsApp(digits);
+          const hit = Array.isArray(results) ? results.find((r) => r?.exists) : null;
+          if (hit?.jid) {
+            jid = hit.jid;
+            // If USync returned a lid-related field, prefer it
+            if (hit.lid) {
+              lidJid = String(hit.lid).includes('@') ? hit.lid : `${hit.lid}@lid`;
+              jid = lidJid;
+              logger.info(`[SEND] onWhatsApp → LID ${jid}`);
+            } else {
+              logger.info(`[SEND] onWhatsApp resolved ${digits} → ${jid}`);
+            }
+          }
+        }
+      } catch (e) {
+        logger.warn(`[SEND] onWhatsApp failed: ${e.message}`);
+      }
+    }
+
+    try {
+      if (typeof sock.assertSessions === 'function') {
+        await sock.assertSessions([jid], true);
+      }
+    } catch (e) {
+      logger.warn(`[SEND] assertSessions(${jid}): ${e.message}`);
+    }
+
+    return jid;
   }
 
   _buildNetworkAgents(proxyRow) {
@@ -1029,10 +1403,11 @@ export class SessionManager extends EventEmitter {
 
     return new Promise((resolve, reject) => {
       let weakTimer = null;
-      // Weak accept = socket still open (NOT proof phone was notified). Disabled under gate
-      // unless HANDSHAKE_ALLOW_WEAK_WITH_GATE=1 (debug only).
-      const weakAcceptEnabled = this.HANDSHAKE_WEAK_ACCEPT_MS > 0
-        && (!this.handshakeGateEnabled || this.allowWeakWithGate);
+      // Weak accept: socket still open after companion_hello.
+      // Under gate we still allow this once companionHelloSent — phone often gets the
+      // "pairing requested" push without a clean restartRequired within HANDSHAKE_WAIT_MS.
+      // Full weak-without-hello remains debug-only (allowWeakWithGate).
+      const weakAcceptEnabled = this.HANDSHAKE_WEAK_ACCEPT_MS > 0;
       if (weakAcceptEnabled) {
         weakTimer = setTimeout(() => {
           const entry = activeSockets.get(accountId);
@@ -1048,7 +1423,8 @@ export class SessionManager extends EventEmitter {
             return;
           }
 
-          if (!waiter.companionHelloSent) {
+          // Require companion_hello unless allowWeakWithGate debug flag is on
+          if (!waiter.companionHelloSent && !this.allowWeakWithGate) {
             logger.warn('[PAIRING-HANDSHAKE] Skipping weak accept — companion_hello not sent yet', {
               accountId,
               phone,
@@ -1056,9 +1432,15 @@ export class SessionManager extends EventEmitter {
             return;
           }
 
+          logger.info(
+            `[PAIRING-HANDSHAKE] Weak accept for ${phone} — ` +
+            `${waiter.companionHelloSent ? 'companion_hello sent + socket open' : 'debug weak (no hello yet)'}; exposing code`
+          );
           void this._resolveHandshakeWait(accountId, null, {
             status: 'accepted_weak',
-            reason: 'socket_open_at_weak_deadline',
+            reason: waiter.companionHelloSent
+              ? 'companion_hello_socket_open'
+              : 'socket_open_at_weak_deadline',
           }).catch((err) => {
             logger.warn('[PAIRING-HANDSHAKE] weak accept resolve failed', {
               accountId,
@@ -1420,6 +1802,7 @@ export class SessionManager extends EventEmitter {
     }
 
     logger.info(`[RECONNECT] Restoring session for ${account.phone} from saved auth (no re-link)`);
+    this._sessionFailCounts.set(accountId, 0);
 
     // Keep warehouse labels; connection.open will set linked when WA accepts
     if (['offline', 'error'].includes(account.status)) {
@@ -1429,15 +1812,25 @@ export class SessionManager extends EventEmitter {
         .catch(() => {});
     }
 
-    const sock = await this.getOrCreateSocket(accountId);
-    const live = !!(sock?.ws?.isOpen);
-
-    return {
-      accountId,
-      phone: account.phone,
-      status: live ? 'live' : 'connecting',
-      reconnected: true,
-    };
+    try {
+      const sock = await this.getOrCreateSocket(accountId, { waitOpen: true, openTimeoutMs: 60000 });
+      const live = !!(sock?.ws?.isOpen);
+      return {
+        accountId,
+        phone: account.phone,
+        status: live ? 'live' : 'connecting',
+        reconnected: true,
+      };
+    } catch (e) {
+      logger.warn(`[RECONNECT] ${account.phone} open wait: ${e.message}`);
+      return {
+        accountId,
+        phone: account.phone,
+        status: 'connecting',
+        reconnected: true,
+        error: e.message,
+      };
+    }
   }
 
   /**
@@ -1839,20 +2232,183 @@ export class SessionManager extends EventEmitter {
     }
   }
 
-  async sendText(accountId, to, text, options = {}) {
-    const sock = await this.getOrCreateSocket(accountId);
-    // Normalize phone → JID (strip +); leave full jids intact
-    let jid = String(to || '').trim();
-    if (!jid.includes('@')) {
-      const digits = normalizeWaPhone(jid, { throwOnInvalid: false, requireCountry: false });
-      jid = `${digits}@s.whatsapp.net`;
-    } else if (jid.endsWith('@s.whatsapp.net') || jid.endsWith('@c.us')) {
-      const [user, server] = jid.split('@');
-      const digits = normalizeWaPhone(user, { throwOnInvalid: false, requireCountry: false });
-      jid = `${digits}@${server}`;
+  /**
+   * Warm the chat path before relay: presence + trusted-contact privacy tokens.
+   * Reduces false "reach-out" (463) when WA thinks this is a cold unknown peer.
+   */
+  async _prepSendPresence(sock, jid) {
+    if (!sock || !jid || jid.endsWith('@g.us') || jid.endsWith('@broadcast')) return;
+    try {
+      if (typeof sock.presenceSubscribe === 'function') {
+        await sock.presenceSubscribe(jid).catch(() => {});
+      }
+      if (typeof sock.sendPresenceUpdate === 'function') {
+        await sock.sendPresenceUpdate('composing', jid).catch(() => {});
+        await new Promise((r) => setTimeout(r, 250 + Math.random() * 350));
+        await sock.sendPresenceUpdate('paused', jid).catch(() => {});
+      }
+    } catch (e) {
+      logger.debug(`[SEND] presence prep skipped: ${e.message}`);
     }
+    try {
+      if (typeof sock.getPrivacyTokens === 'function') {
+        await sock.getPrivacyTokens([jid]).catch(() => {});
+      }
+    } catch (_) { /* optional */ }
+  }
+
+  async sendText(accountId, to, text, options = {}) {
+    // Require a fully open socket — half-dead entries caused Connection Closed / 1006
+    let sock;
+    if (this.isSocketLive(accountId)) {
+      sock = activeSockets.get(accountId).sock;
+    } else {
+      logger.info(`[SEND] Session not live for ${accountId} — reconnecting before send`);
+      try {
+        await this.reconnectAccount(accountId);
+      } catch (e) {
+        if (e.code === 'NO_AUTH') throw e;
+      }
+      sock = await this.getOrCreateSocket(accountId, {
+        waitOpen: true,
+        openTimeoutMs: options.openTimeoutMs || 45000,
+      });
+    }
+    if (!sock?.ws?.isOpen) {
+      throw new Error('WhatsApp session is offline — use Reconnect, then try again');
+    }
+
+    const jid = await this._resolveSendJid(sock, accountId, to);
     if (options.delayMs) await new Promise((r) => setTimeout(r, options.delayMs));
-    return sock.sendMessage(jid, { text });
+
+    // Desk / default: require real SERVER_ACK. Workers may set requirePositiveAck:false.
+    const waitAck = options.waitAck !== false;
+    const requirePositiveAck = options.requirePositiveAck !== false;
+    const ackTimeoutMs = options.ackTimeoutMs || (requirePositiveAck ? 8000 : 3500);
+    const prepPresence = options.prepPresence !== false;
+
+    const doSend = async (s, destJid, { allowLidRetry = true } = {}) => {
+      if (prepPresence) await this._prepSendPresence(s, destJid);
+
+      // Pre-generate id + register waiter BEFORE relay — 463 often lands in ~100ms
+      const msgId = generateMessageIDV2(s.user?.id);
+      if (this._msgCache?.get(accountId)) {
+        this._msgCache.get(accountId).set(msgId, { conversation: text });
+      }
+
+      let ackPromise = null;
+      if (waitAck) {
+        ackPromise = this._waitForSendAck(msgId, ackTimeoutMs, { requirePositiveAck });
+      }
+
+      const t0 = Date.now();
+      let result;
+      try {
+        result = await s.sendMessage(destJid, { text }, { messageId: msgId });
+      } catch (sendErr) {
+        // Cancel waiter if relay itself threw (avoid unhandled rejection on ackPromise)
+        if (ackPromise) ackPromise.catch(() => {});
+        if (this._sendAckWaiters?.has(msgId)) {
+          const w = this._sendAckWaiters.get(msgId);
+          try { w.reject(sendErr); } catch { /* already settled */ }
+        }
+        throw sendErr;
+      }
+
+      const usedId = result?.key?.id || msgId;
+      if (usedId && this._msgCache?.get(accountId)) {
+        this._msgCache.get(accountId).set(usedId, { conversation: text });
+      }
+      logger.info(`[SEND] queued to WA`, {
+        accountId,
+        to: destJid,
+        id: usedId,
+        relayMs: Date.now() - t0,
+      });
+
+      if (ackPromise) {
+        try {
+          // If Baileys rewrote the id (should not with messageId option), re-bind waiter
+          if (usedId !== msgId && this._sendAckWaiters?.has(msgId)) {
+            const w = this._sendAckWaiters.get(msgId);
+            this._sendAckWaiters.delete(msgId);
+            this._sendAckWaiters.set(usedId, w);
+          }
+          const ack = await ackPromise;
+          logger.info(`[SEND] ack`, { id: usedId, ack, totalMs: Date.now() - t0 });
+          result = result || {};
+          result.ack = ack;
+          result.deliveryStatus = ack?.status >= WAMessageStatus.DELIVERY_ACK
+            ? 'delivered'
+            : ack?.status >= WAMessageStatus.SERVER_ACK
+              ? 'server_ack'
+              : 'queued';
+        } catch (ackErr) {
+          // If we sent to PN and got 463, one retry via LID if history has it
+          if (
+            allowLidRetry &&
+            (ackErr.code === 'WA_ACK_463' || /463/.test(ackErr.message)) &&
+            destJid.endsWith('@s.whatsapp.net')
+          ) {
+            const phoneKey = destJid.split('@')[0];
+            let lid = null;
+            try {
+              const convo = await this.db('conversations')
+                .where({ ws_account_id: accountId })
+                .where(function () {
+                  this.where({ contact_phone: phoneKey })
+                    .orWhere({ peer_phone_jid: `${phoneKey}@s.whatsapp.net` });
+                })
+                .first();
+              if (convo?.peer_remote_jid && String(convo.peer_remote_jid).endsWith('@lid')) {
+                lid = convo.peer_remote_jid;
+              }
+            } catch (_) { /* columns may not exist yet before migrate */ }
+            if (!lid) {
+              const recent = await this.db('messages')
+                .where({ ws_account_id: accountId, direction: 'in' })
+                .whereRaw(`raw->'key'->>'senderPn' like ?`, [`${phoneKey}@%`])
+                .orderBy('timestamp', 'desc')
+                .first()
+                .catch(() => null);
+              if (recent?.raw?.key?.remoteJid && String(recent.raw.key.remoteJid).endsWith('@lid')) {
+                lid = recent.raw.key.remoteJid;
+              }
+            }
+            if (lid) {
+              logger.warn(`[SEND] 463 on PN — retrying once via LID ${lid}`);
+              return doSend(s, lid, { allowLidRetry: false });
+            }
+          }
+          throw ackErr;
+        }
+      } else {
+        result.deliveryStatus = 'queued';
+      }
+      return result;
+    };
+
+    try {
+      return await doSend(sock, jid);
+    } catch (e) {
+      const msg = e?.message || String(e);
+      const code = e?.code || '';
+      // Do not reconnect-retry on WA policy nacks
+      if (code === 'WA_ACK_463' || code === 'WA_ACK_ERROR' || /463/.test(msg)) throw e;
+      if (/closed|1006|Connection Closed/i.test(msg) && !/ack/i.test(msg)) {
+        logger.warn(`[SEND] Retry once after ${msg} for ${accountId}`);
+        const entry = activeSockets.get(accountId);
+        if (entry) {
+          entry.dead = true;
+          this._endSocketQuietly(entry.sock);
+          activeSockets.delete(accountId);
+        }
+        sock = await this.getOrCreateSocket(accountId, { waitOpen: true, openTimeoutMs: 45000 });
+        const jid2 = await this._resolveSendJid(sock, accountId, to);
+        return doSend(sock, jid2);
+      }
+      throw e;
+    }
   }
 
   /**

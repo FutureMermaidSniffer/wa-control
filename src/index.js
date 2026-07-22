@@ -209,11 +209,25 @@ sessionEngine.on('messages.upsert', async ({ accountId, messages }) => {
       if (remoteJid === 'status@broadcast' || remoteJid.endsWith('@broadcast')) continue;
 
       const peer = extractPeer(msg);
-      // Conversation key: full group JID for groups (keeps group threads together),
-      // else phone digits (or LID digits if no PN yet)
-      const contactPhone = peer.isGroup
-        ? (peer.groupJid || remoteJid)
-        : (peer.phone || remoteJid.replace(/@.*/, ''));
+
+      // Prefer real phone digits as conversation key when WA provides PN alongside LID
+      const senderPn = msg.key?.senderPn || msg.key?.remoteJidAlt || null;
+      const pnDigits = senderPn && String(senderPn).includes('@')
+        ? String(senderPn).replace(/@.*/, '').replace(/:\d+$/, '')
+        : null;
+
+      // Conversation key: full group JID for groups; else phone digits (never pure LID if PN known)
+      let contactPhone;
+      if (peer.isGroup) {
+        contactPhone = peer.groupJid || remoteJid;
+      } else if (pnDigits && pnDigits.length >= 8 && pnDigits.length < 15) {
+        contactPhone = pnDigits;
+      } else if (peer.phone && !(peer.isLid && peer.phone.length >= 15)) {
+        contactPhone = peer.phone;
+      } else {
+        contactPhone = peer.phone || remoteJid.replace(/@.*/, '');
+      }
+
       let pushName = peer.pushName;
 
       // Resolve group subject for display (cache in conversation name)
@@ -241,13 +255,30 @@ sessionEngine.on('messages.upsert', async ({ accountId, messages }) => {
 
       const convo = await messagesData.findOrCreateConversation(accountId, contactPhone, pushName);
 
+      // Cache peer JIDs from inbound so outbound can reply on the same path instantly
+      if (!peer.isGroup && !msg.key.fromMe) {
+        const phoneJid = senderPn && String(senderPn).includes('@s.whatsapp.net')
+          ? String(senderPn)
+          : (peer.jid && String(peer.jid).includes('@s.whatsapp.net') ? peer.jid : null);
+        const lidJid = remoteJid.endsWith('@lid')
+          ? remoteJid
+          : (peer.jid && String(peer.jid).endsWith('@lid') ? peer.jid : null);
+        await messagesData.updateConversationPeerJids(convo.id, {
+          remoteJid: lidJid || remoteJid,
+          phoneJid: phoneJid || (pnDigits ? `${pnDigits}@s.whatsapp.net` : null),
+        }).catch(() => {});
+      }
+
+      const direction = msg.key.fromMe ? 'out' : 'in';
       await messagesData.createMessage({
         conversation_id: convo.id,
         ws_account_id: accountId,
-        direction: msg.key.fromMe ? 'out' : 'in',
+        direction,
         text: storeText,
         wa_message_id: msg.key?.id,
         timestamp: msg.messageTimestamp ? new Date(Number(msg.messageTimestamp) * 1000) : new Date(),
+        // fromMe upsert after successful desk send → at least server-accepted echo
+        delivery_status: direction === 'out' ? 'server_ack' : null,
         raw: {
           key: msg.key,
           message: msg.message,
@@ -258,7 +289,7 @@ sessionEngine.on('messages.upsert', async ({ accountId, messages }) => {
       });
 
       // Auto-capture contact with name when available (skip pure group jids as contact phones)
-      if (!peer.isGroup && contactPhone) {
+      if (!peer.isGroup && contactPhone && contactPhone.length < 15) {
         try {
           const existing = await db('contacts')
             .where({ phone: contactPhone, assigned_ws_account_id: accountId })
@@ -283,8 +314,10 @@ sessionEngine.on('messages.upsert', async ({ accountId, messages }) => {
         name: pushName || convo.contact_name || null,
         displayId: peer.displayId,
         isLid: peer.isLid,
-        direction: msg.key.fromMe ? 'out' : 'in',
+        direction,
         text,
+        wa_message_id: msg.key?.id || null,
+        delivery_status: direction === 'out' ? 'server_ack' : null,
         timestamp: msg.messageTimestamp ? Number(msg.messageTimestamp) : Date.now(),
         fromMe: !!msg.key.fromMe,
         isGroup: peer.isGroup,
@@ -295,11 +328,56 @@ sessionEngine.on('messages.upsert', async ({ accountId, messages }) => {
         phone: contactPhone,
         name: pushName || null,
         isLid: peer.isLid,
-        direction: msg.key.fromMe ? 'out' : 'in'
+        direction,
       });
     } catch (e) {
       logger.error('Failed to persist incoming message', { error: e.message });
     }
+  }
+});
+
+// Live delivery ticks (SERVER_ACK / DELIVERY_ACK / READ / ERROR 463)
+sessionEngine.on('message.status', async (payload) => {
+  try {
+    const { accountId, waMessageId, status, errorCode, failed, remoteJid } = payload || {};
+    if (!accountId || !waMessageId) return;
+
+    let deliveryStatus = null;
+    if (failed || errorCode) {
+      deliveryStatus = 'failed';
+    } else if (status === 4 || status === 5) {
+      deliveryStatus = 'read';
+    } else if (status === 3) {
+      deliveryStatus = 'delivered';
+    } else if (status === 2) {
+      deliveryStatus = 'server_ack';
+    } else if (status === 1) {
+      deliveryStatus = 'queued';
+    }
+
+    const updated = await messagesData.updateMessageDeliveryByWaId(accountId, waMessageId, {
+      deliveryStatus,
+      failReason: failed
+        ? (errorCode === '463'
+          ? 'WhatsApp reach-out locked (463) — not accepted for immediate delivery'
+          : `WA error ${errorCode || status}`)
+        : null,
+      waStatus: status,
+      rawPatch: { lastStatus: status, errorCode, remoteJid },
+    });
+
+    io.emit('wa:message_status', {
+      accountId,
+      wa_message_id: waMessageId,
+      delivery_status: deliveryStatus,
+      wa_status: status,
+      errorCode: errorCode || null,
+      failed: !!failed,
+      phone: updated ? undefined : undefined,
+      messageId: updated?.id || null,
+    });
+  } catch (e) {
+    logger.warn('message.status handler failed', { error: e.message });
   }
 });
 
@@ -323,27 +401,29 @@ async function gracefulShutdown(signal) {
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
-// Restore linked sessions after boot so closing the browser does not kill WA links
+// Restore sessions that still have Baileys auth (phone may still show linked device)
 setTimeout(async () => {
   try {
+    // Prefer linked/active; also pick up auth rows stuck as offline/error after crash
     const linked = await db('ws_accounts')
-      .whereIn('status', ['linked', 'active'])
       .whereNotNull('baileys_auth_state')
-      .select('id', 'phone');
-    logger.info(`Restoring ${linked.length} linked session(s)...`);
+      .whereIn('status', ['linked', 'active', 'offline', 'error'])
+      .select('id', 'phone', 'status');
+    logger.info(`Restoring ${linked.length} session(s) with saved auth...`);
     for (const acc of linked) {
       try {
-        await sessionEngine.connectAccount(acc.id);
-        logger.info(`Restored session ${acc.phone}`);
+        // Use reconnect path (no auth wipe) and stagger to avoid WA rate limits
+        await sessionEngine.reconnectAccount(acc.id);
+        logger.info(`Restored session ${acc.phone} (was ${acc.status})`);
       } catch (e) {
         logger.warn(`Restore failed for ${acc.phone}: ${e.message}`);
-        // Stay linked in DB — transient network should not flip to error
       }
+      await new Promise((r) => setTimeout(r, 2500));
     }
   } catch (e) {
     logger.warn('Session restore skipped: ' + e.message);
   }
-}, 2500);
+}, 3000);
 
 // Socket.io placeholder (will attach real handlers in realtime/ )
 io.on('connection', (socket) => {

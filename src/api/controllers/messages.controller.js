@@ -1,6 +1,5 @@
 import messagesData from '../../data/messages.data.js';
 import db from '../../db/connection.js';
-import { getSessionManager } from './sessions.controller.js';
 import { logger } from '../../utils/logger.js';
 import { normalizeWaPhone, toWaJid, formatPhonePretty } from '../../utils/phone.js';
 import { getSessionEngine } from '../../core/engine/SessionEngine.js';
@@ -103,31 +102,94 @@ export async function sendMessage(req, res, next) {
 
     if (!to || !text) return res.status(400).json({ error: 'to and text required' });
 
-    const mgr = getSessionManager();
+    const engine = getSessionEngine();
     let result = null;
     let sendError = null;
+    let errorCode = null;
     const jid = toWaJid(to);
     const phoneOnly = normalizeWaPhone(to.includes('@') ? to.split('@')[0] : to, {
       requireCountry: false,
       throwOnInvalid: false,
     });
 
+    // Prefer conversation peer cache (filled on inbound) — same JID path receive used
+    let sendTo = jid;
     try {
-      result = await mgr.sendText(accountId, jid, text, { delayMs: 300 + Math.random() * 1200 });
+      const convoRow = await db('conversations')
+        .where({ ws_account_id: accountId, contact_phone: phoneOnly })
+        .first();
+      if (convoRow?.peer_remote_jid) {
+        sendTo = convoRow.peer_remote_jid;
+        logger.info('[SEND-API] using convo peer_remote_jid', { accountId, phoneOnly, sendTo });
+      } else if (convoRow?.peer_phone_jid) {
+        sendTo = convoRow.peer_phone_jid;
+        logger.info('[SEND-API] using convo peer_phone_jid', { accountId, phoneOnly, sendTo });
+      } else {
+        // Fallback: last inbound key
+        const lastIn = await db('messages')
+          .join('conversations', 'conversations.id', 'messages.conversation_id')
+          .where({
+            'messages.ws_account_id': accountId,
+            'conversations.contact_phone': phoneOnly,
+            'messages.direction': 'in',
+          })
+          .orderBy('messages.timestamp', 'desc')
+          .select('messages.raw')
+          .first();
+        const remote = lastIn?.raw?.key?.remoteJid;
+        const pn = lastIn?.raw?.key?.senderPn || lastIn?.raw?.peer?.jid;
+        if (remote && String(remote).endsWith('@lid')) {
+          sendTo = remote;
+          logger.info('[SEND-API] using history LID', { accountId, phoneOnly, sendTo, pn });
+        } else if (pn && String(pn).includes('@')) {
+          sendTo = pn;
+          logger.info('[SEND-API] using history PN', { accountId, phoneOnly, sendTo });
+        }
+      }
+    } catch (_) { /* ignore */ }
+
+    try {
+      // Desk: short human delay only; require real SERVER_ACK (no timeout_ok lies)
+      result = await engine.sendText(accountId, sendTo, text, {
+        delayMs: 80 + Math.random() * 200,
+        requirePositiveAck: true,
+        ackTimeoutMs: 8000,
+        prepPresence: true,
+      });
     } catch (e) {
       sendError = e.message || String(e);
-      logger.warn('Send via Baileys failed (session may be offline)', { accountId, to: jid, error: sendError });
+      errorCode = e.code || (/463/.test(sendError) ? 'WA_ACK_463' : 'SEND_FAILED');
+      logger.warn('Send via Baileys failed', {
+        accountId,
+        to: sendTo,
+        error: sendError,
+        code: errorCode,
+      });
     }
 
-    // Always persist the outgoing attempt to history (useful for desk even on temp failure)
+    const deliveryStatus = sendError
+      ? 'failed'
+      : (result?.deliveryStatus || 'server_ack');
+
+    // Persist attempt (including failures) so desk history shows what was tried
     const convo = await messagesData.findOrCreateConversation(accountId, phoneOnly);
-    await messagesData.createMessage({
+    const msgRow = await messagesData.createMessage({
       conversation_id: convo.id,
       ws_account_id: accountId,
       direction: 'out',
       text,
       wa_message_id: result?.key?.id || null,
       timestamp: new Date(),
+      delivery_status: deliveryStatus,
+      fail_reason: sendError || null,
+      wa_status: result?.ack?.status ?? null,
+      raw: {
+        ...(sendError ? { sendError, failed: true, errorCode } : {}),
+        sendTo,
+        message: result ? { conversation: text } : undefined,
+        key: result?.key || undefined,
+        ack: result?.ack || undefined,
+      },
     });
 
     // Auto-assign / create contact for this WS number (desk usage)
@@ -146,10 +208,30 @@ export async function sendMessage(req, res, next) {
     }
 
     if (sendError) {
-      return res.status(202).json({ success: false, accepted: true, error: sendError, note: 'Message stored; will retry when session is live' });
+      const is463 = errorCode === 'WA_ACK_463' || /463|reach-out/i.test(sendError);
+      const isOffline = /offline|reconnect|NO_AUTH|not live/i.test(sendError);
+      return res.status(isOffline ? 503 : 409).json({
+        success: false,
+        error: sendError,
+        code: errorCode,
+        delivery_status: 'failed',
+        messageId: msgRow?.id || null,
+        wa_message_id: result?.key?.id || null,
+        hint: is463
+          ? 'WhatsApp reach-out lock (463): message was not accepted for immediate delivery. Reply to contacts who messaged you first, warm the number, or retry later. Do not assume the phone received it.'
+          : isOffline
+            ? 'WhatsApp session is offline or flapping. Click Reconnect and wait for Session OPEN, then retry.'
+            : 'Send failed — message was not confirmed by WhatsApp.',
+      });
     }
 
-    res.json({ success: true, result });
+    res.json({
+      success: true,
+      result,
+      delivery_status: deliveryStatus,
+      messageId: msgRow?.id || null,
+      wa_message_id: result?.key?.id || null,
+    });
   } catch (e) { next(e); }
 }
 
