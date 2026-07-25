@@ -568,11 +568,20 @@ export async function updateAccountProfile(req, res, next) {
         .first();
       res.json({
         success: true,
+        partial: !!result.partial,
         data: {
           ...fresh,
           session_live: true,
-          applied: result,
+          applied: result.applied,
+          errors: result.errors,
         },
+        // Human-readable summary for desk toast
+        message: result.partial
+          ? `Partial update: ${Object.entries(result.applied || {}).filter(([, v]) => v).map(([k]) => k).join(', ') || 'none'} ok.`
+            + (result.errors?.length
+              ? ` Failed: ${result.errors.map((e) => e.field).join(', ')}. ${result.errors[0]?.message || ''}`
+              : '')
+          : 'Profile updated on WhatsApp',
       });
     } catch (e) {
       if (e.code === 'SESSION_OFFLINE' || /offline|Reconnect/i.test(e.message || '')) {
@@ -582,8 +591,23 @@ export async function updateAccountProfile(req, res, next) {
           hint: 'Click Reconnect for this account, wait until live, then try again.',
         });
       }
+      if (e.code === 'APP_STATE_KEY_MISSING' || /App state key/i.test(e.message || '')) {
+        return res.status(409).json({
+          error: e.message,
+          code: 'APP_STATE_KEY_MISSING',
+          hint:
+            'Display name needs a WhatsApp app-state key from the primary phone. ' +
+            'Keep the phone online, Reconnect this linked session, wait 30 seconds, then retry. ' +
+            'You can still set profile photo and About without that key.',
+          errors: e.errors,
+        });
+      }
       logger.error('Profile update failed', { accountId, error: e.message, stack: e.stack });
-      return res.status(502).json({ error: e.message || 'Profile update failed' });
+      return res.status(502).json({
+        error: e.message || 'Profile update failed',
+        code: e.code || 'PROFILE_FAILED',
+        errors: e.errors,
+      });
     }
   } catch (err) { next(err); }
 }

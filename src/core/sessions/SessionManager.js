@@ -1074,8 +1074,17 @@ export class SessionManager extends EventEmitter {
         const bucket = state.keys[type];
         if (!bucket || typeof bucket !== 'object') return out;
         for (const id of ids || []) {
-          const value = bucket[id];
+          let value = bucket[id];
           if (value !== undefined && value !== null) {
+            // Baileys multi-file auth rehydrates this type as a protobuf — required for
+            // updateProfileName / chatModify / app state patches.
+            if (type === 'app-state-sync-key') {
+              try {
+                value = proto.Message.AppStateSyncKeyData.fromObject(value);
+              } catch (e) {
+                logger.warn(`[AUTH] app-state-sync-key fromObject failed for ${id}: ${e.message}`);
+              }
+            }
             out[id] = value;
           }
         }
@@ -2427,7 +2436,49 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * Wait until Baileys has myAppStateKeyId (needed for push-name / app-state patches).
+   * Key is shared by the primary phone after companion link; may lag a few seconds after open.
+   */
+  async _waitForAppStateKey(sock, timeoutMs = 20000) {
+    if (sock?.authState?.creds?.myAppStateKeyId) {
+      return sock.authState.creds.myAppStateKeyId;
+    }
+    return new Promise((resolve) => {
+      const t0 = Date.now();
+      let settled = false;
+      const finish = (val) => {
+        if (settled) return;
+        settled = true;
+        clearInterval(timer);
+        try { sock.ev?.off?.('creds.update', onCreds); } catch { /* ignore */ }
+        resolve(val);
+      };
+      const onCreds = (update) => {
+        const id = update?.myAppStateKeyId || sock.authState?.creds?.myAppStateKeyId;
+        if (id) finish(id);
+      };
+      const timer = setInterval(() => {
+        if (sock.authState?.creds?.myAppStateKeyId) {
+          finish(sock.authState.creds.myAppStateKeyId);
+        } else if (Date.now() - t0 >= timeoutMs) {
+          finish(null);
+        }
+      }, 400);
+      try { sock.ev?.on?.('creds.update', onCreds); } catch { /* ignore */ }
+      // Nudge presence — sometimes helps primary share app-state keys
+      try {
+        if (typeof sock.sendPresenceUpdate === 'function') {
+          sock.sendPresenceUpdate('available').catch(() => {});
+        }
+      } catch { /* ignore */ }
+    });
+  }
+
+  /**
    * Update this account's live WhatsApp profile (name, picture, About status).
+   * Picture + About use direct IQs (no app-state key). Display name needs app-state sync key.
+   * Fields are applied independently so a name failure does not block avatar/status.
+   *
    * @param {string} accountId
    * @param {{ name?: string, status?: string, avatarBufferOrPath?: Buffer|string, avatarUrl?: string }} opts
    */
@@ -2449,34 +2500,102 @@ export class SessionManager extends EventEmitter {
       throw e;
     }
 
-    if (name != null && String(name).trim()) {
-      await sock.updateProfileName(String(name).trim());
-    }
-    if (status != null && String(status).trim() !== '') {
-      if (typeof sock.updateProfileStatus === 'function') {
-        await sock.updateProfileStatus(String(status).trim());
+    const applied = { name: false, status: false, avatar: false };
+    const errors = [];
+    const wantName = name != null && String(name).trim();
+    const wantStatus = status != null && String(status).trim() !== '';
+    const wantAvatar = !!avatarBufferOrPath;
+
+    // --- Display name (requires myAppStateKeyId / app-state sync) ---
+    if (wantName) {
+      const trimmed = String(name).trim();
+      let keyId = sock.authState?.creds?.myAppStateKeyId;
+      if (!keyId) {
+        logger.info(`[PROFILE] waiting for app-state key before rename (${accountId})`);
+        keyId = await this._waitForAppStateKey(sock, 20000);
+      }
+      if (!keyId) {
+        errors.push({
+          field: 'name',
+          code: 'APP_STATE_KEY_MISSING',
+          message:
+            'Cannot change display name yet: WhatsApp app-state key not synced to this linked device. ' +
+            'Keep the primary phone online, Reconnect this account, wait ~30s, then retry the name. ' +
+            'Profile photo and About can still be updated.',
+        });
+        logger.warn(`[PROFILE] name skipped — no myAppStateKeyId for ${accountId}`);
+      } else {
+        try {
+          await sock.updateProfileName(trimmed);
+          applied.name = true;
+        } catch (e) {
+          const msg = e?.message || String(e);
+          errors.push({
+            field: 'name',
+            code: /App state key/i.test(msg) ? 'APP_STATE_KEY_MISSING' : 'NAME_FAILED',
+            message: msg,
+          });
+          logger.warn(`[PROFILE] updateProfileName failed: ${msg}`);
+        }
       }
     }
-    if (avatarBufferOrPath) {
-      const buffer = Buffer.isBuffer(avatarBufferOrPath)
-        ? avatarBufferOrPath
-        : await fs.readFile(avatarBufferOrPath);
-      // Baileys 6.x: updateProfilePicture(jid, content)
-      const meJid = sock.user?.id || sock.authState?.creds?.me?.id;
-      if (!meJid) throw new Error('Session has no self JID — cannot set profile picture');
-      await sock.updateProfilePicture(meJid, buffer);
+
+    // --- About / status (direct IQ — no app-state key) ---
+    if (wantStatus) {
+      try {
+        if (typeof sock.updateProfileStatus === 'function') {
+          await sock.updateProfileStatus(String(status).trim());
+          applied.status = true;
+        }
+      } catch (e) {
+        errors.push({ field: 'status', code: 'STATUS_FAILED', message: e.message || String(e) });
+      }
+    }
+
+    // --- Picture (direct IQ — no app-state key) ---
+    if (wantAvatar) {
+      try {
+        const buffer = Buffer.isBuffer(avatarBufferOrPath)
+          ? avatarBufferOrPath
+          : await fs.readFile(avatarBufferOrPath);
+        const meJid = sock.user?.id || sock.authState?.creds?.me?.id;
+        if (!meJid) throw new Error('Session has no self JID — cannot set profile picture');
+        await sock.updateProfilePicture(meJid, buffer);
+        applied.avatar = true;
+      } catch (e) {
+        errors.push({ field: 'avatar', code: 'AVATAR_FAILED', message: e.message || String(e) });
+        logger.warn(`[PROFILE] updateProfilePicture failed: ${e.message}`);
+      }
+    }
+
+    const anyOk = applied.name || applied.status || applied.avatar;
+    if (!anyOk) {
+      const first = errors[0];
+      const e = new Error(first?.message || 'Profile update failed');
+      e.code = first?.code || 'PROFILE_FAILED';
+      e.errors = errors;
+      throw e;
     }
 
     const patch = { updated_at: this.db.fn.now() };
-    if (name != null && String(name).trim()) patch.display_name = String(name).trim();
-    if (avatarUrl) patch.avatar_url = avatarUrl;
+    if (applied.name) patch.display_name = String(name).trim();
+    if (applied.avatar && avatarUrl) patch.avatar_url = avatarUrl;
+    // If only name failed but we had a local name intent, still store name in DB when picture ok? No — only on WA success.
+    // Optionally store display_name from request when name applied OR when only DB-level:
+    if (!applied.name && wantName && anyOk) {
+      // Keep DB display_name as operator intent for UI even if WA push-name pending
+      patch.display_name = String(name).trim();
+    }
     await this.db('ws_accounts').where({ id: accountId }).update(patch);
 
     return {
       accountId,
+      applied,
+      errors: errors.length ? errors : undefined,
+      partial: errors.length > 0,
       display_name: patch.display_name,
       avatar_url: patch.avatar_url || null,
-      status: status != null ? String(status).trim() : undefined,
+      status: applied.status ? String(status).trim() : undefined,
     };
   }
 

@@ -2990,14 +2990,17 @@
       });
       const j = await res.json().catch(() => ({}));
       if (!res.ok) {
-        showToast((j.error || 'Profile update failed') + (j.hint ? ' — ' + j.hint : ''), 'error', 7000);
+        showToast((j.error || 'Profile update failed') + (j.hint ? ' — ' + j.hint : ''), 'error', 9000);
         return;
       }
-      showToast('Profile updated on WhatsApp', 'success');
+      if (j.partial) {
+        showToast(j.message || 'Partial profile update — see details', 'warn', 8000);
+      } else {
+        showToast(j.message || 'Profile updated on WhatsApp', 'success');
+      }
       hideModal();
       await loadDeskAccounts();
       if (currentDeskAccount === accountId) {
-        // re-select to refresh header if needed
         selectDeskAccount(accountId);
       }
     } catch (e) {
