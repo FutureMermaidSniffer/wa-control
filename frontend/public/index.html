@@ -364,7 +364,8 @@
         <div class="wa-col wa-accounts">
           <div class="wa-col-head">
             <span>Accounts</span>
-            <button class="wa-icon-btn" style="margin-left:auto;color:#e9edef" onclick="loadDeskAccounts()" title="Refresh">↻</button>
+            <button class="wa-icon-btn" style="margin-left:auto;color:#e9edef" onclick="openDeskProfileEditor()" title="Edit profile for selected account">✎</button>
+            <button class="wa-icon-btn" style="color:#e9edef" onclick="loadDeskAccounts()" title="Refresh">↻</button>
           </div>
           <div class="wa-col-body" id="wa-account-list">
             <div style="padding:16px;color:#8696a0;font-size:13px">Loading accounts…</div>
@@ -436,16 +437,20 @@
     <!-- ===== GROUP PULLS ===== -->
     <div id="tab-laqun" class="tab card" style="display:none">
       <h3 style="margin-top:0">👥 Group Pulls</h3>
+      <div style="font-size:12px;color:#666;margin-bottom:8px">
+        Admin account must be <strong>linked / live</strong>. Targets: full international phones separated by commas or newlines
+        (e.g. <code>254712345678, 254798765432</code>), <em>or</em> a small number like <code>50</code> for count-only.
+      </div>
       <div class="row" style="margin-bottom:10px">
         <select id="laqun-admin" style="min-width:160px"></select>
         <input id="laqun-subject" placeholder="Group name/subject" style="flex:1" />
-        <input id="laqun-targets" placeholder="Target phones +1,+2 or count" style="flex:1" />
+        <input id="laqun-targets" placeholder="2547…,2547…  or  count e.g. 50" style="flex:1" />
         <button class="accent" onclick="createLaqunTask()">Create Task</button>
         <button onclick="loadLaqun()">↻ Refresh</button>
       </div>
       <div class="row" style="margin-bottom:8px">
         <button onclick="executeSelectedLaqun()">▶ Execute Selected</button>
-        <input id="laqun-add-phones" placeholder="Phones to add (comma)" style="width:220px" />
+        <input id="laqun-add-phones" placeholder="Phones to add (2547…,2547…)" style="width:280px" />
         <button onclick="addMembersToSelectedLaqun()">+ Add Members</button>
       </div>
       <table id="laqun-table">
@@ -582,20 +587,24 @@
       </div>
     </div>
 
-    <!-- ===== MATERIALS ===== -->
+    <!-- ===== MATERIALS (warming / blasts / groups content pool) ===== -->
     <div id="tab-materials" class="tab card" style="display:none">
-      <h3 style="margin-top:0">🎨 Materials</h3>
-      <div style="font-size:12px;color:#666;background:#fafafa;padding:8px;border-radius:6px;margin-bottom:10px">
-        <strong>Avatars</strong>: profile pictures (uploaded, Sharp-resized 512×512). 
-        <strong>Nicknames</strong>: display names for warming/batch. 
-        <strong>Messages</strong>: quick-reply templates for desk. 
-        <strong>Audio</strong>: .ogg/.opus voice notes for warming peer audio exchange.
+      <h3 style="margin-top:0">🎨 Materials (warming &amp; campaigns)</h3>
+      <div style="font-size:12px;color:#555;background:#f0f9ff;border:1px solid #bae6fd;padding:10px 12px;border-radius:6px;margin-bottom:10px;line-height:1.45">
+        Content library for <strong>warming</strong>, <strong>blasts</strong>, and <strong>group tools</strong>.
+        <br><strong>This does not change a number’s live WhatsApp profile.</strong>
+        To set display name / profile photo for a linked account, open <strong>💬 Chat Desk</strong> → select the account → <strong>Edit profile</strong>.
       </div>
       <div class="row" style="margin-bottom:10px">
-        <select id="mat-type"><option>nickname</option><option>message</option><option>avatar</option><option>audio</option></select>
+        <select id="mat-type">
+          <option value="nickname">nickname (warming)</option>
+          <option value="message">message template</option>
+          <option value="audio">audio / voice note</option>
+          <option value="avatar">warming avatar pool</option>
+        </select>
         <input id="mat-name" placeholder="name" style="width:120px" />
-        <input id="mat-content" placeholder="content / text (non-file types)" style="flex:1" />
-        <input id="mat-file" type="file" style="max-width:180px" />
+        <input id="mat-content" placeholder="text content (nick / message)" style="flex:1" />
+        <input id="mat-file" type="file" accept="image/*,audio/*" style="max-width:180px" />
         <button class="accent" onclick="addMaterial()">Add</button>
         <button onclick="loadMaterials()">↻ Refresh</button>
       </div>
@@ -2538,22 +2547,58 @@
     if (btn) btn.style.fontWeight = 'bold';
   }
 
+  function parseLaqunTargetsClient(raw) {
+    const s = (raw || '').trim();
+    if (!s) return { target_count: 0, target_contacts: null };
+    // Pure small integer = count only
+    if (/^\d{1,4}$/.test(s) && s.length < 10) {
+      return { target_count: parseInt(s, 10), target_contacts: null };
+    }
+    const tokens = s.split(/[\s,;]+/).map(t => t.trim()).filter(Boolean);
+    const phones = [];
+    const invalid = [];
+    for (const t of tokens) {
+      const d = t.replace(/\D/g, '');
+      if (d.length >= 10 && d.length <= 15) phones.push(d);
+      else invalid.push(t);
+    }
+    return {
+      target_count: phones.length,
+      target_contacts: phones.length ? phones : null,
+      invalid,
+    };
+  }
+
   async function createLaqunTask() {
     const admin = document.getElementById('laqun-admin').value;
     const subject = document.getElementById('laqun-subject').value || 'New Group';
     const raw = document.getElementById('laqun-targets').value.trim();
     if (!admin) { showToast('Select admin account first', 'error'); return; }
-    let target_count = 0, target_contacts = null;
-    if (raw) {
-      if (/^\d+$/.test(raw)) target_count = parseInt(raw);
-      else target_contacts = raw.split(',').map(p => p.trim()).filter(Boolean);
+    const parsed = parseLaqunTargetsClient(raw);
+    if (raw && !parsed.target_contacts && !parsed.target_count) {
+      showToast('No valid phones. Use full numbers e.g. 254712345678, or a count like 50', 'error', 6000);
+      return;
+    }
+    if (parsed.invalid?.length) {
+      showToast('Skipping invalid: ' + parsed.invalid.join(', '), 'warn', 4000);
     }
     const res = await fetch(API + '/group-pulls', {
       method: 'POST', headers: authHeaders(),
-      body: JSON.stringify({ subject, admin_ws_account_id: admin, target_count, target_contacts })
+      body: JSON.stringify({
+        subject,
+        admin_ws_account_id: admin,
+        target_count: parsed.target_count,
+        target_contacts: parsed.target_contacts,
+      })
     });
-    if (res.ok) { showToast('Pull task created', 'success'); loadLaqun(); }
-    else { const e = await res.json().catch(() => ({})); showToast('Failed: ' + (e.error || res.status), 'error'); }
+    const j = await res.json().catch(() => ({}));
+    if (res.ok) {
+      const n = j.data?.target_contacts?.length || j.data?.target_count || 0;
+      showToast('Pull task created' + (n ? ` (${n} targets)` : ''), 'success');
+      loadLaqun();
+    } else {
+      showToast('Failed: ' + (j.error || res.status), 'error', 7000);
+    }
   }
 
   async function executeLaqun(id) {
@@ -2852,17 +2897,112 @@
       return;
     }
     list.innerHTML = deskAccountsCache.map(a => {
-      const on = ['linked', 'active'].includes(a.status);
+      const live = a.session_live === true || ['linked', 'active'].includes(a.status);
       const active = currentDeskAccount === a.id ? 'active' : '';
-      return `<div class="wa-acct-row ${active}" data-id="${a.id}" onclick="selectDeskAccount('${a.id}')">
-        <div class="wa-avatar">${escapeHtml(initialsFrom(a.display_name || a.phone))}</div>
+      const av = a.avatar_url
+        ? `<img src="${escapeHtml(a.avatar_url)}" alt="" onerror="this.remove()"/>`
+        : escapeHtml(initialsFrom(a.display_name || a.phone));
+      return `<div class="wa-acct-row ${active}" data-id="${a.id}" onclick="selectDeskAccount('${a.id}')" ondblclick="openDeskProfileEditor('${a.id}')">
+        <div class="wa-avatar">${av}</div>
         <div class="wa-acct-meta">
           <div class="wa-acct-title phone-fmt">${escapeHtml(formatPhonePretty(a.phone))}</div>
-          <div class="wa-acct-sub"><span class="wa-status-dot ${on?'on':'off'}"></span>${escapeHtml(a.status)}${a.display_name ? ' · ' + escapeHtml(a.display_name) : ''}</div>
+          <div class="wa-acct-sub"><span class="wa-status-dot ${live?'on':'off'}"></span>${a.session_live ? 'live' : escapeHtml(a.status)}${a.display_name ? ' · ' + escapeHtml(a.display_name) : ''}</div>
         </div>
       </div>`;
     }).join('');
     loadQuickReplies();
+  }
+
+  /** Edit live WhatsApp profile (name / About / picture) for a desk account */
+  async function openDeskProfileEditor(accountId) {
+    const id = accountId || currentDeskAccount;
+    if (!id) {
+      showToast('Select an account first', 'error');
+      return;
+    }
+    const acc = deskAccountsCache.find(a => a.id === id) || {};
+    let profile = { display_name: acc.display_name || '', avatar_url: acc.avatar_url || '', phone: acc.phone };
+    try {
+      const res = await fetch(API + `/sessions/${id}/profile`, { headers: authHeaders() });
+      if (res.ok) {
+        const j = await res.json();
+        if (j.data) profile = { ...profile, ...j.data };
+      }
+    } catch (_) { /* use cache */ }
+
+    const body = `
+      <div style="font-size:13px;margin-bottom:10px;color:#555">
+        Live WhatsApp profile for <strong class="phone-fmt">${escapeHtml(formatPhonePretty(profile.phone || acc.phone))}</strong>.
+        Account must be <strong>live</strong> (Reconnect if needed).
+      </div>
+      <div class="row" style="align-items:center;margin-bottom:12px;gap:12px">
+        <div class="wa-avatar" id="profile-preview-av" style="width:64px;height:64px;font-size:18px;flex-shrink:0">
+          ${profile.avatar_url
+            ? `<img src="${escapeHtml(profile.avatar_url)}?t=${Date.now()}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:50%"/>`
+            : escapeHtml(initialsFrom(profile.display_name || profile.phone))}
+        </div>
+        <div style="flex:1">
+          <label style="font-size:11px;color:#666">Profile picture</label>
+          <input type="file" id="profile-avatar-file" accept="image/*" style="display:block;margin-top:4px;font-size:12px"
+            onchange="previewDeskProfileAvatar(this)" />
+        </div>
+      </div>
+      <label style="font-size:11px;color:#666">Display name</label>
+      <input id="profile-name" value="${escapeHtml(profile.display_name || '')}" placeholder="WhatsApp display name" style="width:100%;margin:4px 0 10px;padding:8px;border:1px solid var(--border);border-radius:6px" />
+      <label style="font-size:11px;color:#666">About (status)</label>
+      <input id="profile-status" value="" placeholder="Hey there! I am using WhatsApp." style="width:100%;margin:4px 0 4px;padding:8px;border:1px solid var(--border);border-radius:6px" />
+      <div style="font-size:11px;color:#888;margin-top:6px">Leave About blank to keep current. Empty picture keeps current photo.</div>
+    `;
+    const footer = `
+      <button onclick="hideModal()">Cancel</button>
+      <button class="primary" onclick="saveDeskProfile('${id}')">Save to WhatsApp</button>
+    `;
+    showModal('Edit profile', body, footer);
+  }
+
+  function previewDeskProfileAvatar(input) {
+    const file = input?.files?.[0];
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    const el = document.getElementById('profile-preview-av');
+    if (el) el.innerHTML = `<img src="${url}" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:50%"/>`;
+  }
+
+  async function saveDeskProfile(accountId) {
+    const name = document.getElementById('profile-name')?.value?.trim() || '';
+    const status = document.getElementById('profile-status')?.value?.trim() || '';
+    const fileInput = document.getElementById('profile-avatar-file');
+    const file = fileInput?.files?.[0];
+    if (!name && !status && !file) {
+      showToast('Change name, About, or pick a photo', 'error');
+      return;
+    }
+    const fd = new FormData();
+    if (name) fd.append('name', name);
+    if (status) fd.append('status', status);
+    if (file) fd.append('avatar', file);
+    showToast('Updating WhatsApp profile…', 'info', 2500);
+    try {
+      const res = await fetch(API + `/sessions/${accountId}/profile`, {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + TOKEN },
+        body: fd,
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showToast((j.error || 'Profile update failed') + (j.hint ? ' — ' + j.hint : ''), 'error', 7000);
+        return;
+      }
+      showToast('Profile updated on WhatsApp', 'success');
+      hideModal();
+      await loadDeskAccounts();
+      if (currentDeskAccount === accountId) {
+        // re-select to refresh header if needed
+        selectDeskAccount(accountId);
+      }
+    } catch (e) {
+      showToast('Network error: ' + e.message, 'error');
+    }
   }
 
   async function selectDeskAccount(accountId) {

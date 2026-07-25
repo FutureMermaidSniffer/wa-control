@@ -9,6 +9,10 @@ import db from '../../db/connection.js';
 import { logger } from '../../utils/logger.js';
 import portsData from '../../data/ports.data.js';
 import { normalizeWaPhone } from '../../utils/phone.js';
+import config from '../../config/index.js';
+import sharp from 'sharp';
+import path from 'path';
+import fs from 'fs/promises';
 
 // Back-compat: getSessionManager returns the underlying transport or engine methods
 export function getSessionManager() {
@@ -490,6 +494,97 @@ export async function sendTestMessage(req, res, next) {
     const engine = getSessionEngine();
     const result = await engine.sendText(accountId, to, text, { delayMs: 800 });
     res.json({ success: true, result });
+  } catch (err) { next(err); }
+}
+
+/**
+ * GET live-profile metadata for a WS account (DB + session_live).
+ */
+export async function getAccountProfile(req, res, next) {
+  try {
+    const { accountId } = req.params;
+    const acc = await db('ws_accounts')
+      .where({ id: accountId })
+      .select('id', 'phone', 'status', 'display_name', 'avatar_url', 'notes')
+      .first();
+    if (!acc) return res.status(404).json({ error: 'Account not found' });
+    const engine = getSessionEngine();
+    const session_live = !!engine.isSocketLive?.(accountId);
+    res.json({
+      data: {
+        ...acc,
+        session_live,
+      },
+    });
+  } catch (err) { next(err); }
+}
+
+/**
+ * POST multipart profile update → pushes to WhatsApp (name, about, picture).
+ * Fields: name?, status? (About text), file field "avatar" optional.
+ */
+export async function updateAccountProfile(req, res, next) {
+  try {
+    const { accountId } = req.params;
+    const acc = await db('ws_accounts').where({ id: accountId }).first();
+    if (!acc) return res.status(404).json({ error: 'Account not found' });
+
+    const name = req.body?.name != null ? String(req.body.name).trim() : undefined;
+    const status = req.body?.status != null ? String(req.body.status).trim() : undefined;
+    const hasAvatar = !!req.file;
+
+    if (!name && status === undefined && !hasAvatar) {
+      return res.status(400).json({
+        error: 'Provide at least one of: name, status (About), or avatar file',
+      });
+    }
+
+    let avatarBuffer = null;
+    let avatarUrl = null;
+    if (hasAvatar) {
+      const uploadDir = path.join(config.UPLOAD_DIR || './uploads', 'profile');
+      await fs.mkdir(uploadDir, { recursive: true });
+      const filename = `${accountId}.jpg`;
+      const filepath = path.join(uploadDir, filename);
+      avatarBuffer = await sharp(req.file.buffer)
+        .resize(512, 512, { fit: 'cover' })
+        .jpeg({ quality: 85 })
+        .toBuffer();
+      await fs.writeFile(filepath, avatarBuffer);
+      avatarUrl = `/uploads/profile/${filename}`;
+    }
+
+    const engine = getSessionEngine();
+    try {
+      const result = await engine.updateProfile(accountId, {
+        name: name || undefined,
+        status: status !== undefined ? status : undefined,
+        avatarBufferOrPath: avatarBuffer || undefined,
+        avatarUrl: avatarUrl || undefined,
+      });
+      const fresh = await db('ws_accounts')
+        .where({ id: accountId })
+        .select('id', 'phone', 'status', 'display_name', 'avatar_url')
+        .first();
+      res.json({
+        success: true,
+        data: {
+          ...fresh,
+          session_live: true,
+          applied: result,
+        },
+      });
+    } catch (e) {
+      if (e.code === 'SESSION_OFFLINE' || /offline|Reconnect/i.test(e.message || '')) {
+        return res.status(503).json({
+          error: e.message,
+          code: 'SESSION_OFFLINE',
+          hint: 'Click Reconnect for this account, wait until live, then try again.',
+        });
+      }
+      logger.error('Profile update failed', { accountId, error: e.message, stack: e.stack });
+      return res.status(502).json({ error: e.message || 'Profile update failed' });
+    }
   } catch (err) { next(err); }
 }
 

@@ -2426,21 +2426,58 @@ export class SessionManager extends EventEmitter {
     }
   }
 
-  async updateProfile(accountId, { name, avatarBufferOrPath }) {
-    const sock = await this.getOrCreateSocket(accountId);
-    if (name) await sock.updateProfileName(name);
+  /**
+   * Update this account's live WhatsApp profile (name, picture, About status).
+   * @param {string} accountId
+   * @param {{ name?: string, status?: string, avatarBufferOrPath?: Buffer|string, avatarUrl?: string }} opts
+   */
+  async updateProfile(accountId, { name, status, avatarBufferOrPath, avatarUrl } = {}) {
+    // Prefer live socket; reconnect if needed
+    let sock;
+    if (this.isSocketLive?.(accountId)) {
+      sock = activeSockets.get(accountId)?.sock;
+    }
+    if (!sock?.ws?.isOpen) {
+      try {
+        await this.reconnectAccount?.(accountId);
+      } catch (_) { /* fall through */ }
+      sock = await this.getOrCreateSocket(accountId);
+    }
+    if (!sock?.ws?.isOpen) {
+      const e = new Error('WhatsApp session is offline — Reconnect the account first, then update profile');
+      e.code = 'SESSION_OFFLINE';
+      throw e;
+    }
+
+    if (name != null && String(name).trim()) {
+      await sock.updateProfileName(String(name).trim());
+    }
+    if (status != null && String(status).trim() !== '') {
+      if (typeof sock.updateProfileStatus === 'function') {
+        await sock.updateProfileStatus(String(status).trim());
+      }
+    }
     if (avatarBufferOrPath) {
       const buffer = Buffer.isBuffer(avatarBufferOrPath)
         ? avatarBufferOrPath
         : await fs.readFile(avatarBufferOrPath);
-      await sock.updateProfilePicture(buffer);
+      // Baileys 6.x: updateProfilePicture(jid, content)
+      const meJid = sock.user?.id || sock.authState?.creds?.me?.id;
+      if (!meJid) throw new Error('Session has no self JID — cannot set profile picture');
+      await sock.updateProfilePicture(meJid, buffer);
     }
-    // Update DB record
-    await this.db('ws_accounts').where({ id: accountId }).update({
-      display_name: name || undefined,
-      // avatar_url would be set after successful update if you fetch it
-      updated_at: this.db.fn.now(),
-    });
+
+    const patch = { updated_at: this.db.fn.now() };
+    if (name != null && String(name).trim()) patch.display_name = String(name).trim();
+    if (avatarUrl) patch.avatar_url = avatarUrl;
+    await this.db('ws_accounts').where({ id: accountId }).update(patch);
+
+    return {
+      accountId,
+      display_name: patch.display_name,
+      avatar_url: patch.avatar_url || null,
+      status: status != null ? String(status).trim() : undefined,
+    };
   }
 
   /**

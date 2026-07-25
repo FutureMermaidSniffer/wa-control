@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import multer from 'multer';
 import {
   listSessions,
   connectNumber,
@@ -9,10 +10,16 @@ import {
   pairingDiagnostics,
   markRegistered,
   getQr,
+  getAccountProfile,
+  updateAccountProfile,
 } from '../controllers/sessions.controller.js';
 import { authenticate, requireRole } from '../middleware/auth.js';
 
 const router = Router();
+const profileUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+});
 
 // Protected - supervisor for management, later agents limited view
 router.get('/sessions', authenticate, listSessions);
@@ -28,6 +35,16 @@ router.post('/sessions/connect', authenticate, requireRole('supervisor'), connec
 router.post('/sessions/:accountId/reconnect', authenticate, requireRole(['supervisor', 'agent']), reconnectSession);
 router.post('/sessions/:accountId/disconnect', authenticate, requireRole(['supervisor', 'agent']), disconnectNumber);
 router.post('/sessions/:accountId/test-send', authenticate, requireRole('supervisor'), sendTestMessage);
+
+/** Live WhatsApp profile (name / About / picture) for a linked number */
+router.get('/sessions/:accountId/profile', authenticate, requireRole(['supervisor', 'agent']), getAccountProfile);
+router.post(
+  '/sessions/:accountId/profile',
+  authenticate,
+  requireRole(['supervisor', 'agent']),
+  profileUpload.single('avatar'),
+  updateAccountProfile
+);
 
 /**
  * Mark an account as primary_registered (ready for pairing code) or force-reset its status.
