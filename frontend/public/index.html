@@ -2794,12 +2794,18 @@
     const rest = d.slice(ccLen).replace(/(\d{3})(?=\d)/g, '$1 ').trim();
     return `+${cc} ${rest}`;
   }
-  function formatPeerPhone(phone) {
+  function formatPeerPhone(phone, isLid) {
     if (!phone) return 'Unknown';
     const p = String(phone);
     if (p.includes('@g.us')) return 'Group';
-    if (/^\d{15,}$/.test(p)) return `LID ${p.slice(0, 10)}…`;
+    if (isLid === true || (isLid == null && /^\d{15,}$/.test(p))) {
+      return `LID ${p.slice(0, 10)}…`;
+    }
     return formatPhonePretty(p);
+  }
+  function sameDeskPeer(a, b) {
+    if (a == null || b == null) return false;
+    return String(a) === String(b);
   }
   function initialsFrom(nameOrPhone) {
     const s = String(nameOrPhone || '?').trim();
@@ -3107,19 +3113,17 @@
     if (j.wa_message_id && row) row.dataset.waId = j.wa_message_id;
     if (j.messageId && row) row.dataset.msgId = j.messageId;
     if (!res.ok) {
-      const hint = j.hint || (j.code === 'WA_ACK_463'
+      // Only treat true WA_ACK_463 as reach-out lock — never timeout/soft messages
+      const is463 = j.code === 'WA_ACK_463';
+      const hint = j.hint || (is463
         ? 'WhatsApp reach-out lock — message not accepted for immediate delivery'
-        : 'session may be offline; use Reconnect');
-      showToast((j.error || 'Send failed') + ' — ' + hint, 'error', 9000);
-      const lastText = row?.querySelector('.wa-bubble-text');
-      if (lastText && !String(lastText.textContent).startsWith('[FAILED]')) {
-        /* keep original text; show status failed */
-      }
+        : 'check session (Reconnect) and logs');
+      showToast((j.error || 'Send failed') + (hint ? ' — ' + hint : ''), 'error', 9000);
       updateBubbleStatus(j.wa_message_id || row?.dataset?.waId, 'failed');
       const st = row?.querySelector('[data-role="status"]');
       if (st) {
         st.className = 'wa-bubble-status failed';
-        st.textContent = j.code === 'WA_ACK_463' ? 'Blocked' : 'Failed';
+        st.textContent = is463 ? 'Blocked' : 'Failed';
       }
       row?.querySelector('.wa-bubble')?.classList.add('failed');
     } else {
@@ -3202,7 +3206,16 @@
       liveSocket.on('wa:message', (data) => {
         const deskVisible = document.getElementById('tab-desk')?.style.display !== 'none';
         if (!deskVisible) return;
-        if (currentDeskAccount === data.accountId && currentDeskPhone === data.phone) {
+        // Match open chat by canonical phone OR LID alias (same human, different WA routing id)
+        const matchesOpen = currentDeskAccount === data.accountId && (
+          sameDeskPeer(currentDeskPhone, data.phone)
+          || sameDeskPeer(currentDeskPhone, data.lid)
+        );
+        if (matchesOpen) {
+          // Prefer phone key once known (after LID→PN merge)
+          if (data.phone && !data.isLid && data.phone !== currentDeskPhone) {
+            currentDeskPhone = data.phone;
+          }
           const box = document.getElementById('desk-messages');
           if (box) {
             // Avoid duplicate bubble if we already have this WA id (desk send + upsert echo)
@@ -3220,16 +3233,16 @@
             });
             box.scrollTop = box.scrollHeight;
           }
-        } else if (deskVisible) loadDeskConversations();
+        }
+        if (currentDeskAccount === data.accountId) loadDeskConversations();
       });
       liveSocket.on('wa:message_status', (data) => {
         if (!data?.wa_message_id) return;
         if (currentDeskAccount && data.accountId && data.accountId !== currentDeskAccount) return;
         updateBubbleStatus(data.wa_message_id, data.delivery_status);
-        if (data.failed) {
-          showToast(data.errorCode === '463'
-            ? 'Delivery blocked by WhatsApp (reach-out lock 463)'
-            : 'Message delivery failed', 'error', 6000);
+        // Only toast hard failures with real 463 code — not soft/timeout noise
+        if (data.failed && (data.errorCode === '463' || data.errorCode === 'WA_ACK_463')) {
+          showToast('Delivery blocked by WhatsApp (reach-out lock 463)', 'error', 6000);
         }
       });
       liveSocket.on('wa:qr', ({ phone, qr, accountId }) => {

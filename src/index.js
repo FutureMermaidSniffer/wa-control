@@ -211,21 +211,37 @@ sessionEngine.on('messages.upsert', async ({ accountId, messages }) => {
       const peer = extractPeer(msg);
 
       // Prefer real phone digits as conversation key when WA provides PN alongside LID
-      const senderPn = msg.key?.senderPn || msg.key?.remoteJidAlt || null;
-      const pnDigits = senderPn && String(senderPn).includes('@')
-        ? String(senderPn).replace(/@.*/, '').replace(/:\d+$/, '')
-        : null;
+      const pnDigits = peer.phone || null;
+      const lidDigits = peer.lid || (remoteJid.endsWith('@lid') ? remoteJid.replace(/@.*/, '') : null);
 
-      // Conversation key: full group JID for groups; else phone digits (never pure LID if PN known)
+      // Conversation key: group JID; else phone (preferred); else existing convo for this LID; else LID digits
       let contactPhone;
+      let existingByLid = null;
       if (peer.isGroup) {
         contactPhone = peer.groupJid || remoteJid;
-      } else if (pnDigits && pnDigits.length >= 8 && pnDigits.length < 15) {
+      } else if (pnDigits) {
         contactPhone = pnDigits;
-      } else if (peer.phone && !(peer.isLid && peer.phone.length >= 15)) {
-        contactPhone = peer.phone;
+        // If we previously stored this human under LID digits only, merge into phone thread
+        if (lidDigits) {
+          existingByLid = await messagesData.findConversationByLid(accountId, lidDigits).catch(() => null);
+          if (existingByLid && existingByLid.contact_phone !== pnDigits) {
+            await messagesData.mergeConversations(accountId, existingByLid.contact_phone, pnDigits, {
+              contactName: peer.pushName || existingByLid.contact_name,
+              contactLid: lidDigits,
+              peerRemoteJid: lidDigits ? `${lidDigits}@lid` : null,
+              peerPhoneJid: `${pnDigits}@s.whatsapp.net`,
+            }).catch((e) => logger.warn('LID merge failed', { error: e.message }));
+          }
+        }
+      } else if (lidDigits) {
+        existingByLid = await messagesData.findConversationByLid(accountId, lidDigits).catch(() => null);
+        if (existingByLid?.contact_phone) {
+          contactPhone = existingByLid.contact_phone;
+        } else {
+          contactPhone = lidDigits;
+        }
       } else {
-        contactPhone = peer.phone || remoteJid.replace(/@.*/, '');
+        contactPhone = remoteJid.replace(/@.*/, '');
       }
 
       let pushName = peer.pushName;
@@ -257,16 +273,19 @@ sessionEngine.on('messages.upsert', async ({ accountId, messages }) => {
 
       // Cache peer JIDs from inbound so outbound can reply on the same path instantly
       if (!peer.isGroup && !msg.key.fromMe) {
-        const phoneJid = senderPn && String(senderPn).includes('@s.whatsapp.net')
-          ? String(senderPn)
-          : (peer.jid && String(peer.jid).includes('@s.whatsapp.net') ? peer.jid : null);
-        const lidJid = remoteJid.endsWith('@lid')
-          ? remoteJid
-          : (peer.jid && String(peer.jid).endsWith('@lid') ? peer.jid : null);
+        const phoneJid = pnDigits ? `${pnDigits}@s.whatsapp.net` : null;
+        const lidJid = lidDigits ? `${lidDigits}@lid` : (remoteJid.endsWith('@lid') ? remoteJid : null);
         await messagesData.updateConversationPeerJids(convo.id, {
           remoteJid: lidJid || remoteJid,
-          phoneJid: phoneJid || (pnDigits ? `${pnDigits}@s.whatsapp.net` : null),
+          phoneJid,
         }).catch(() => {});
+        // Persist contact_lid when column exists
+        if (lidDigits) {
+          await db('conversations')
+            .where({ id: convo.id })
+            .update({ contact_lid: lidDigits, updated_at: db.fn.now() })
+            .catch(() => {});
+        }
       }
 
       const direction = msg.key.fromMe ? 'out' : 'in';
@@ -288,15 +307,15 @@ sessionEngine.on('messages.upsert', async ({ accountId, messages }) => {
         },
       });
 
-      // Auto-capture contact with name when available (skip pure group jids as contact phones)
-      if (!peer.isGroup && contactPhone && contactPhone.length < 15) {
+      // Auto-capture contact with real phone only (not LID digit keys)
+      if (!peer.isGroup && pnDigits && pnDigits.length < 15) {
         try {
           const existing = await db('contacts')
-            .where({ phone: contactPhone, assigned_ws_account_id: accountId })
+            .where({ phone: pnDigits, assigned_ws_account_id: accountId })
             .first();
           if (!existing) {
             await db('contacts').insert({
-              phone: contactPhone,
+              phone: pnDigits,
               name: pushName || null,
               assigned_ws_account_id: accountId,
               source: msg.key.fromMe ? 'desk_out' : 'inbound',
@@ -308,12 +327,14 @@ sessionEngine.on('messages.upsert', async ({ accountId, messages }) => {
         } catch (e) { /* ignore dups */ }
       }
 
+      const isLidKey = !pnDigits && !!lidDigits && contactPhone === lidDigits;
       io.emit('wa:message', {
         accountId,
         phone: contactPhone,
+        lid: lidDigits || null,
         name: pushName || convo.contact_name || null,
         displayId: peer.displayId,
-        isLid: peer.isLid,
+        isLid: isLidKey || peer.isLid,
         direction,
         text,
         wa_message_id: msg.key?.id || null,
@@ -326,8 +347,9 @@ sessionEngine.on('messages.upsert', async ({ accountId, messages }) => {
       logger.info('Message persisted + broadcast', {
         accountId,
         phone: contactPhone,
+        lid: lidDigits,
         name: pushName || null,
-        isLid: peer.isLid,
+        isLid: isLidKey || peer.isLid,
         direction,
       });
     } catch (e) {

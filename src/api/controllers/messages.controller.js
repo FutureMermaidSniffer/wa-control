@@ -149,21 +149,25 @@ export async function sendMessage(req, res, next) {
     } catch (_) { /* ignore */ }
 
     try {
-      // Desk: short human delay only; require real SERVER_ACK (no timeout_ok lies)
+      // Desk: short delay + brief ack wait. Timeout after successful relay is NOT a failure
+      // (see SessionManager.sendText). Real 463 nacks still throw WA_ACK_463.
       result = await engine.sendText(accountId, sendTo, text, {
         delayMs: 80 + Math.random() * 200,
-        requirePositiveAck: true,
-        ackTimeoutMs: 8000,
+        ackTimeoutMs: 12000,
         prepPresence: true,
       });
     } catch (e) {
       sendError = e.message || String(e);
-      errorCode = e.code || (/463/.test(sendError) ? 'WA_ACK_463' : 'SEND_FAILED');
+      // Only label 463 when Baileys/stub actually reported it — never on timeout text
+      errorCode = e.code
+        || (e.code !== 'WA_ACK_TIMEOUT' && /(?:^|\D)463(?:\D|$)/.test(sendError) ? 'WA_ACK_463' : null)
+        || 'SEND_FAILED';
       logger.warn('Send via Baileys failed', {
         accountId,
         to: sendTo,
         error: sendError,
         code: errorCode,
+        stack: e.stack,
       });
     }
 
@@ -208,7 +212,8 @@ export async function sendMessage(req, res, next) {
     }
 
     if (sendError) {
-      const is463 = errorCode === 'WA_ACK_463' || /463|reach-out/i.test(sendError);
+      // Strict: only true WA_ACK_463 gets the reach-out lock copy (not timeouts / soft messages)
+      const is463 = errorCode === 'WA_ACK_463';
       const isOffline = /offline|reconnect|NO_AUTH|not live/i.test(sendError);
       return res.status(isOffline ? 503 : 409).json({
         success: false,
@@ -221,7 +226,7 @@ export async function sendMessage(req, res, next) {
           ? 'WhatsApp reach-out lock (463): message was not accepted for immediate delivery. Reply to contacts who messaged you first, warm the number, or retry later. Do not assume the phone received it.'
           : isOffline
             ? 'WhatsApp session is offline or flapping. Click Reconnect and wait for Session OPEN, then retry.'
-            : 'Send failed — message was not confirmed by WhatsApp.',
+            : 'Send failed at the transport layer — check session and logs.',
       });
     }
 

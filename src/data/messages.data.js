@@ -26,6 +26,109 @@ export async function findOrCreateConversation(wsAccountId, contactPhone, contac
 }
 
 /**
+ * Find conversation already linked to this LID remote JID (peer_remote_jid or contact_lid).
+ */
+export async function findConversationByLid(wsAccountId, lidUserOrJid) {
+  if (!lidUserOrJid) return null;
+  const lidUser = String(lidUserOrJid).replace(/@.*/, '').replace(/\D/g, '');
+  if (!lidUser) return null;
+  const lidJid = `${lidUser}@lid`;
+  // Prefer peer cache (filled on inbound)
+  let convo = await db('conversations')
+    .where({ ws_account_id: wsAccountId, peer_remote_jid: lidJid })
+    .first()
+    .catch(() => null);
+  if (convo) return convo;
+  // contact_lid column (if present from 008)
+  convo = await db('conversations')
+    .where({ ws_account_id: wsAccountId, contact_lid: lidUser })
+    .first()
+    .catch(() => null);
+  if (convo) return convo;
+  // Legacy: conversation keyed by raw LID digits
+  convo = await db('conversations')
+    .where({ ws_account_id: wsAccountId, contact_phone: lidUser })
+    .first();
+  return convo || null;
+}
+
+/**
+ * Merge source conversation into target (move messages, delete source).
+ * Used when we learn phone for a previously LID-only thread.
+ */
+export async function mergeConversations(wsAccountId, fromContactPhone, toContactPhone, extras = {}) {
+  if (!fromContactPhone || !toContactPhone || fromContactPhone === toContactPhone) return null;
+
+  const source = await db('conversations')
+    .where({ ws_account_id: wsAccountId, contact_phone: fromContactPhone })
+    .first();
+  if (!source) return null;
+
+  let target = await db('conversations')
+    .where({ ws_account_id: wsAccountId, contact_phone: toContactPhone })
+    .first();
+
+  if (!target) {
+    const [updated] = await db('conversations')
+      .where({ id: source.id })
+      .update({
+        contact_phone: toContactPhone,
+        contact_name: extras.contactName || source.contact_name,
+        contact_lid: extras.contactLid || source.contact_lid || fromContactPhone,
+        peer_remote_jid: extras.peerRemoteJid || source.peer_remote_jid,
+        peer_phone_jid: extras.peerPhoneJid || source.peer_phone_jid,
+        peer_jid_updated_at: db.fn.now(),
+        updated_at: db.fn.now(),
+      })
+      .returning('*')
+      .catch(async () => {
+        // contact_lid may not exist on older DBs
+        const [u] = await db('conversations')
+          .where({ id: source.id })
+          .update({
+            contact_phone: toContactPhone,
+            contact_name: extras.contactName || source.contact_name,
+            peer_remote_jid: extras.peerRemoteJid || source.peer_remote_jid,
+            peer_phone_jid: extras.peerPhoneJid || source.peer_phone_jid,
+            peer_jid_updated_at: db.fn.now(),
+            updated_at: db.fn.now(),
+          })
+          .returning('*');
+        return [u];
+      });
+    return updated;
+  }
+
+  await db('messages')
+    .where({ conversation_id: source.id })
+    .update({ conversation_id: target.id });
+
+  const lastAt = [source.last_message_at, target.last_message_at]
+    .filter(Boolean)
+    .sort((a, b) => new Date(b) - new Date(a))[0];
+
+  const patch = {
+    unread_count: (target.unread_count || 0) + (source.unread_count || 0),
+    last_message_at: lastAt || target.last_message_at,
+    contact_name: extras.contactName || target.contact_name || source.contact_name,
+    peer_remote_jid: extras.peerRemoteJid || target.peer_remote_jid || source.peer_remote_jid,
+    peer_phone_jid: extras.peerPhoneJid || target.peer_phone_jid || source.peer_phone_jid,
+    peer_jid_updated_at: db.fn.now(),
+    updated_at: db.fn.now(),
+  };
+  if (extras.contactLid || source.contact_lid) {
+    patch.contact_lid = extras.contactLid || target.contact_lid || source.contact_lid;
+  }
+
+  await db('conversations').where({ id: target.id }).update(patch).catch(async () => {
+    delete patch.contact_lid;
+    await db('conversations').where({ id: target.id }).update(patch);
+  });
+  await db('conversations').where({ id: source.id }).del();
+  return db('conversations').where({ id: target.id }).first();
+}
+
+/**
  * Cache the JIDs WhatsApp used for this peer (from inbound).
  * Enables instant correct outbound addressing without heavy history scans.
  */
@@ -214,6 +317,8 @@ export async function markConversationRead(convoId) {
 
 export default {
   findOrCreateConversation,
+  findConversationByLid,
+  mergeConversations,
   updateConversationPeerJids,
   listConversationsForAccount,
   getConversation,

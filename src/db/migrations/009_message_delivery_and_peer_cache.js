@@ -5,11 +5,20 @@
  * peer_remote_jid / peer_phone_jid: last known WA addressing from inbound (LID + PN)
  */
 export async function up(knex) {
-  const hasDelivery = await knex.schema.hasColumn('messages', 'delivery_status');
-  if (!hasDelivery) {
+  // Columns may already exist partially (e.g. delivery_status from an earlier 008).
+  // Add each independently so fail_reason / wa_status are never skipped.
+  if (!(await knex.schema.hasColumn('messages', 'delivery_status'))) {
     await knex.schema.alterTable('messages', (t) => {
       t.string('delivery_status', 32).defaultTo(null);
+    });
+  }
+  if (!(await knex.schema.hasColumn('messages', 'fail_reason'))) {
+    await knex.schema.alterTable('messages', (t) => {
       t.string('fail_reason', 512).defaultTo(null);
+    });
+  }
+  if (!(await knex.schema.hasColumn('messages', 'wa_status'))) {
+    await knex.schema.alterTable('messages', (t) => {
       t.integer('wa_status').defaultTo(null); // Baileys WAMessageStatus numeric
     });
   }

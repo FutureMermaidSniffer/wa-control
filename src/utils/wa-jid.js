@@ -1,72 +1,138 @@
 /**
  * WhatsApp JID helpers — phone numbers vs privacy LIDs.
- * No third-party API: use Baileys key fields only.
+ * Tuned for Baileys 6.7.x (senderPn / participantPn).
  */
 
+/** @param {string|null|undefined} jid */
+export function isLidJid(jid) {
+  return typeof jid === 'string' && jid.endsWith('@lid');
+}
+
+/** @param {string|null|undefined} jid */
+export function isPhoneJid(jid) {
+  return typeof jid === 'string' && (jid.endsWith('@s.whatsapp.net') || jid.endsWith('@c.us'));
+}
+
+/** @param {string|null|undefined} jid */
+export function isGroupJid(jid) {
+  return typeof jid === 'string' && jid.includes('@g.us');
+}
+
 /**
- * Prefer a real phone JID (@s.whatsapp.net / @c.us) over @lid when Baileys provides alt fields.
+ * User part of a JID (digits / lid id), no device suffix.
+ * @param {string|null|undefined} jidOrUser
+ * @returns {string|null}
+ */
+export function jidUser(jidOrUser) {
+  if (jidOrUser == null || jidOrUser === '') return null;
+  let s = String(jidOrUser).trim();
+  if (s.includes('@')) s = s.split('@')[0];
+  s = s.replace(/:\d+$/, '').replace(/[^\d]/g, '');
+  return s || null;
+}
+
+/**
+ * Heuristic: WA LID user ids are long numeric strings (typically 15+ digits).
+ * @param {string|null|undefined} digits
+ */
+export function looksLikeLidDigits(digits) {
+  const d = String(digits || '').replace(/\D/g, '');
+  return d.length >= 15;
+}
+
+/**
+ * Pull a phone-looking JID out of candidates.
+ * @param {Array<string|null|undefined>} candidates
+ * @returns {string|null}
+ */
+function firstPhoneJid(candidates) {
+  for (const c of candidates) {
+    if (typeof c !== 'string' || !c) continue;
+    if (c.includes('@s.whatsapp.net') || c.includes('@c.us')) {
+      const u = jidUser(c);
+      if (u) return `${u}@s.whatsapp.net`;
+    }
+    if (!c.includes('@')) {
+      const u = c.replace(/\D/g, '');
+      if (u.length >= 8 && u.length <= 15) return `${u}@s.whatsapp.net`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Prefer a real phone JID over @lid when Baileys provides PN fields.
  * @param {object} msg - Baileys WAMessage
- * @returns {{ jid: string|null, phone: string|null, isLid: boolean, pushName: string|null, displayId: string }}
  */
 export function extractPeer(msg) {
   if (!msg?.key) {
-    return { jid: null, phone: null, isLid: false, pushName: null, displayId: '?' };
+    return {
+      jid: null,
+      sendJid: null,
+      phone: null,
+      lid: null,
+      isLid: false,
+      isGroup: false,
+      groupJid: null,
+      pushName: null,
+      displayId: '?',
+    };
   }
 
   const key = msg.key;
   const remote = key.remoteJid || null;
-  // Baileys versions expose PN in different places when primary is LID
-  const altCandidates = [
+  const isGroup = isGroupJid(remote);
+
+  const pnCandidates = [
     key.remoteJidAlt,
     key.participantAlt,
-    key.participantPn,
     key.senderPn,
+    key.participantPn,
     msg.senderPn,
-    msg.participant,
+    isLidJid(remote) ? key.participant : null,
   ].filter(Boolean);
 
+  const phoneJid = firstPhoneJid(pnCandidates);
+
+  let lidUser = null;
+  if (isLidJid(remote)) lidUser = jidUser(remote);
+  if (!lidUser && key.senderLid) lidUser = jidUser(key.senderLid);
+  if (!lidUser && key.participantLid) lidUser = jidUser(key.participantLid);
+  if (!lidUser && isLidJid(key.participant)) lidUser = jidUser(key.participant);
+
   let preferred = remote;
-  for (const c of altCandidates) {
-    if (typeof c === 'string' && (c.includes('@s.whatsapp.net') || c.includes('@c.us'))) {
-      preferred = c;
-      break;
-    }
-  }
+  if (!isGroup && phoneJid) preferred = phoneJid;
+  else if (!isGroup && isLidJid(remote)) preferred = remote;
 
-  // Group messages: participant may be the real sender
-  if (remote?.includes('@g.us')) {
-    const part = key.participant || key.participantAlt || key.participantPn;
-    if (part) preferred = part;
-  }
+  const isLidOnly = !isGroup && !phoneJid && !!(preferred && isLidJid(preferred));
 
-  const isLid = !!(preferred && preferred.endsWith('@lid'));
-  const isGroup = !!(remote && remote.includes('@g.us'));
-  let phone = null;
-  if (preferred) {
-    phone = preferred
-      .replace(/@.*/, '')
-      .replace(/:\d+$/, '')
-      .replace(/[^\d+]/g, '');
-    // Keep leading + only if original had country formatting; digits-only is fine for storage
-    if (phone.startsWith('+')) phone = phone.slice(1);
-  }
+  let resolvedPhone = phoneJid ? jidUser(phoneJid) : null;
+  if (!resolvedPhone && isPhoneJid(remote)) resolvedPhone = jidUser(remote);
+  if (!resolvedPhone && isPhoneJid(preferred)) resolvedPhone = jidUser(preferred);
+
+  const lid = lidUser || (isLidOnly ? jidUser(preferred) : null);
 
   const pushName = (!key.fromMe && msg.pushName)
     ? String(msg.pushName).trim()
     : null;
 
-  // Human-facing id for desk when we only have LID
-  let displayId = phone || '?';
-  if (isLid && phone) {
-    displayId = pushName ? `${pushName}` : `LID ${phone.slice(0, 8)}…`;
-  } else if (phone && phone.length >= 8) {
-    displayId = phone.startsWith('+') ? phone : `+${phone}`;
-  }
+  let displayId = '?';
+  if (resolvedPhone) displayId = `+${resolvedPhone}`;
+  else if (lid) displayId = pushName || `LID ${String(lid).slice(0, 10)}…`;
+  else if (isGroup) displayId = 'Group';
+
+  const sendJid = isGroup
+    ? remote
+    : (resolvedPhone
+      ? `${resolvedPhone}@s.whatsapp.net`
+      : (lid ? `${lid}@lid` : preferred));
 
   return {
     jid: preferred || remote,
-    phone: phone || null,
-    isLid,
+    sendJid: sendJid || null,
+    phone: resolvedPhone || null,
+    lid: lid || null,
+    isLid: !resolvedPhone && !!lid,
     isGroup,
     groupJid: isGroup ? remote : null,
     pushName,
@@ -90,4 +156,12 @@ export function formatDeskLine({ direction, phone, name, text, isLid }) {
   return `← ${who}: ${body}`;
 }
 
-export default { extractPeer, formatDeskLine };
+export default {
+  extractPeer,
+  formatDeskLine,
+  isLidJid,
+  isPhoneJid,
+  isGroupJid,
+  jidUser,
+  looksLikeLidDigits,
+};

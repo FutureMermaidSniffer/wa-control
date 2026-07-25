@@ -786,21 +786,19 @@ export class SessionManager extends EventEmitter {
    * Wait for delivery ack or 463 nack.
    * IMPORTANT: call this (register waiter) BEFORE sendMessage — WA often nacks within ~100ms.
    *
+   * Timeout NEVER rejects as failure when the message was already relayed — peer delivery
+   * can lag (offline phone) and SERVER_ACK can arrive late under multi-device. Real failures
+   * are ERROR status / stub 463 via messages.update.
+   *
    * @param {string} msgId
    * @param {number} [timeoutMs]
    * @param {{ requirePositiveAck?: boolean }} [opts]
-   *   requirePositiveAck (default true): timeout without SERVER_ACK+ rejects.
-   *   If false, timeout resolves as timeout_ok (legacy blast/warming leniency).
+   *   requirePositiveAck only affects whether we wait at all for a status update;
+   *   timeout always resolves soft (timeout_ok) so desk does not false-fail delivered msgs.
    */
-  _waitForSendAck(msgId, timeoutMs = 8000, opts = {}) {
-    const requirePositiveAck = opts.requirePositiveAck !== false;
+  _waitForSendAck(msgId, timeoutMs = 12000, opts = {}) {
     if (!msgId) {
-      if (requirePositiveAck) {
-        const e = new Error('No WhatsApp message id — cannot confirm delivery');
-        e.code = 'WA_NO_MSG_ID';
-        return Promise.reject(e);
-      }
-      return Promise.resolve({ status: 'no_id' });
+      return Promise.resolve({ status: 'no_id', soft: true });
     }
     if (!this._sendAckWaiters) this._sendAckWaiters = new Map();
 
@@ -814,17 +812,9 @@ export class SessionManager extends EventEmitter {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this._sendAckWaiters.delete(msgId);
-        if (requirePositiveAck) {
-          const e = new Error(
-            `No WhatsApp server ack within ${timeoutMs}ms — message not confirmed delivered. ` +
-            `Do not treat as sent (possible reach-out lock or offline session).`
-          );
-          e.code = 'WA_ACK_TIMEOUT';
-          reject(e);
-        } else {
-          // Legacy leniency for non-desk jobs that opt out
-          resolve({ status: 'timeout_ok' });
-        }
+        // Soft resolve: relay already completed in sendMessage; async status continues via message.status
+        logger.info(`[SEND-ACK] timeout ${timeoutMs}ms for ${msgId} — treating as queued (not a failure)`);
+        resolve({ status: 'timeout_ok', soft: true });
       }, timeoutMs);
       this._sendAckWaiters.set(msgId, {
         resolve: (v) => { clearTimeout(timer); this._sendAckWaiters.delete(msgId); resolve(v); },
@@ -2281,10 +2271,9 @@ export class SessionManager extends EventEmitter {
     const jid = await this._resolveSendJid(sock, accountId, to);
     if (options.delayMs) await new Promise((r) => setTimeout(r, options.delayMs));
 
-    // Desk / default: require real SERVER_ACK. Workers may set requirePositiveAck:false.
+    // Wait briefly for SERVER_ACK / real 463 nack. Timeout after successful relay is NOT failure.
     const waitAck = options.waitAck !== false;
-    const requirePositiveAck = options.requirePositiveAck !== false;
-    const ackTimeoutMs = options.ackTimeoutMs || (requirePositiveAck ? 8000 : 3500);
+    const ackTimeoutMs = options.ackTimeoutMs || 12000;
     const prepPresence = options.prepPresence !== false;
 
     const doSend = async (s, destJid, { allowLidRetry = true } = {}) => {
@@ -2298,7 +2287,7 @@ export class SessionManager extends EventEmitter {
 
       let ackPromise = null;
       if (waitAck) {
-        ackPromise = this._waitForSendAck(msgId, ackTimeoutMs, { requirePositiveAck });
+        ackPromise = this._waitForSendAck(msgId, ackTimeoutMs, {});
       }
 
       const t0 = Date.now();
@@ -2326,6 +2315,10 @@ export class SessionManager extends EventEmitter {
         relayMs: Date.now() - t0,
       });
 
+      // Successful relay = at least accepted for routing. Upgrade via ack if it arrives in time.
+      result = result || {};
+      result.deliveryStatus = 'server_ack';
+
       if (ackPromise) {
         try {
           // If Baileys rewrote the id (should not with messageId option), re-bind waiter
@@ -2336,13 +2329,16 @@ export class SessionManager extends EventEmitter {
           }
           const ack = await ackPromise;
           logger.info(`[SEND] ack`, { id: usedId, ack, totalMs: Date.now() - t0 });
-          result = result || {};
           result.ack = ack;
-          result.deliveryStatus = ack?.status >= WAMessageStatus.DELIVERY_ACK
-            ? 'delivered'
-            : ack?.status >= WAMessageStatus.SERVER_ACK
-              ? 'server_ack'
-              : 'queued';
+          if (ack?.soft || ack?.status === 'timeout_ok' || ack?.status === 'no_id') {
+            result.deliveryStatus = 'server_ack';
+          } else if (typeof ack?.status === 'number' && ack.status >= WAMessageStatus.DELIVERY_ACK) {
+            result.deliveryStatus = 'delivered';
+          } else if (typeof ack?.status === 'number' && ack.status >= WAMessageStatus.SERVER_ACK) {
+            result.deliveryStatus = 'server_ack';
+          } else {
+            result.deliveryStatus = 'server_ack';
+          }
         } catch (ackErr) {
           // If we sent to PN and got 463, one retry via LID if history has it
           if (
@@ -2380,10 +2376,9 @@ export class SessionManager extends EventEmitter {
               return doSend(s, lid, { allowLidRetry: false });
             }
           }
+          // Only real WA rejections fail the send; never invent timeout→463
           throw ackErr;
         }
-      } else {
-        result.deliveryStatus = 'queued';
       }
       return result;
     };
