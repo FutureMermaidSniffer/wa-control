@@ -196,6 +196,10 @@ export class SessionEngine {
     return this.manager.sendText(accountId, to, text, options);
   }
 
+  async sendMedia(accountId, to, opts = {}) {
+    return this.manager.sendMedia(accountId, to, opts);
+  }
+
   async getProfilePictureUrl(accountId, phoneOrJid, type = 'preview') {
     return this.manager.getProfilePictureUrl(accountId, phoneOrJid, type);
   }

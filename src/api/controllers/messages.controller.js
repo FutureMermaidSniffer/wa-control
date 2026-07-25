@@ -28,27 +28,78 @@ export async function listConversations(req, res, next) {
 }
 
 /**
+ * Resolve best JID candidate list for avatar / send peer cache.
+ */
+async function resolvePeerLookup(accountId, phoneParam) {
+  const raw = String(phoneParam || '').trim();
+  const digits = normalizeWaPhone(raw.includes('@') ? raw.split('@')[0] : raw, {
+    requireCountry: false,
+    throwOnInvalid: false,
+  });
+  let convo = null;
+  try {
+    convo = await db('conversations')
+      .where({ ws_account_id: accountId })
+      .where(function () {
+        this.where({ contact_phone: digits })
+          .orWhere({ contact_lid: digits })
+          .orWhere({ contact_phone: raw });
+        if (digits) {
+          this.orWhere({ peer_remote_jid: `${digits}@lid` })
+            .orWhere({ peer_phone_jid: `${digits}@s.whatsapp.net` });
+        }
+      })
+      .first();
+  } catch (_) {
+    convo = await db('conversations')
+      .where({ ws_account_id: accountId, contact_phone: digits || raw })
+      .first()
+      .catch(() => null);
+  }
+  return { digits, raw, convo };
+}
+
+/**
  * GET profile picture for a contact (Baileys → cache → /uploads/avatars/…).
+ * Uses conversation peer_phone_jid when the list key is a LID.
  */
 export async function getContactAvatar(req, res, next) {
   try {
     const { accountId, phone } = req.params;
-    const digits = normalizeWaPhone(phone, { requireCountry: false, throwOnInvalid: false });
-    const cacheKey = `${accountId}:${digits}`;
+    const { digits, convo } = await resolvePeerLookup(accountId, phone);
+
+    // Prefer real phone digits for cache key so LID + PN share one avatar
+    const phoneKey = (convo?.peer_phone_jid
+      ? String(convo.peer_phone_jid).replace(/@.*/, '')
+      : null)
+      || (convo?.contact_phone && String(convo.contact_phone).length < 15 ? convo.contact_phone : null)
+      || digits
+      || phone;
+
+    const cacheKey = `${accountId}:${phoneKey}`;
     const cached = avatarCache.get(cacheKey);
     if (cached && Date.now() - cached.at < AVATAR_TTL_MS && cached.localPath) {
-      return res.json({ url: cached.localPath, cached: true });
+      return res.json({ url: cached.localPath, cached: true, phone: phoneKey });
     }
 
+    // Baileys lookup candidates: phone JID first, then LID, then raw
+    const tryIds = [];
+    if (convo?.peer_phone_jid) tryIds.push(convo.peer_phone_jid);
+    if (phoneKey && phoneKey.length < 15) tryIds.push(phoneKey);
+    if (convo?.peer_remote_jid) tryIds.push(convo.peer_remote_jid);
+    if (digits) tryIds.push(digits);
+    tryIds.push(phone);
+
     let remoteUrl = null;
-    try {
-      remoteUrl = await getSessionEngine().getProfilePictureUrl(accountId, digits);
-    } catch (e) {
-      return res.status(404).json({ error: 'avatar unavailable', detail: e.message });
+    const engine = getSessionEngine();
+    for (const id of tryIds) {
+      try {
+        remoteUrl = await engine.getProfilePictureUrl(accountId, id);
+        if (remoteUrl) break;
+      } catch (_) { /* try next */ }
     }
     if (!remoteUrl) return res.status(404).json({ error: 'no profile picture' });
 
-    // Download & store locally so browser can load without WA CDN cookies
     const uploadDir = path.join(config.UPLOAD_DIR || './uploads', 'avatars');
     await fs.mkdir(uploadDir, { recursive: true });
     const hash = crypto.createHash('sha1').update(cacheKey).digest('hex').slice(0, 16);
@@ -62,103 +113,156 @@ export async function getContactAvatar(req, res, next) {
         const buf = Buffer.from(await resp.arrayBuffer());
         await fs.writeFile(filepath, buf);
         avatarCache.set(cacheKey, { url: remoteUrl, localPath: publicPath, at: Date.now() });
-        return res.json({ url: publicPath, cached: false });
+        return res.json({ url: publicPath, cached: false, phone: phoneKey });
       }
     } catch (e) {
       logger.warn('Avatar download failed', { error: e.message });
     }
-    // Fall back to remote URL (may or may not load in browser)
     avatarCache.set(cacheKey, { url: remoteUrl, localPath: remoteUrl, at: Date.now() });
-    res.json({ url: remoteUrl, remote: true });
+    res.json({ url: remoteUrl, remote: true, phone: phoneKey });
   } catch (e) { next(e); }
 }
 
 export async function getMessages(req, res, next) {
   try {
-    const { accountId, phone } = req.params; // or use convo id later
-    // Find convo by account + phone
-    const convo = await db('conversations')
+    const { accountId, phone } = req.params;
+    let convo = await db('conversations')
       .where({ ws_account_id: accountId, contact_phone: phone })
       .first();
+    if (!convo) {
+      convo = await db('conversations')
+        .where({ ws_account_id: accountId, contact_lid: phone })
+        .first()
+        .catch(() => null);
+    }
 
     if (!convo) return res.json({ data: [], conversation: null });
 
     const msgs = await messagesData.listMessages(convo.id, Number(req.query.limit) || 100);
-    // Attach peer phone/name on each message so desk never shows text-only rows
+    const isLid = !!(convo.contact_lid && convo.contact_phone === convo.contact_lid)
+      || /^\d{15,}$/.test(String(convo.contact_phone || ''));
     const enriched = (msgs || []).map((m) => ({
       ...m,
       phone: convo.contact_phone,
+      lid: convo.contact_lid || null,
       name: convo.contact_name || null,
-      isLid: /^\d{15,}$/.test(String(convo.contact_phone || '')),
+      isLid,
+      media_url: m.media?.url || m.media?.localPath || null,
+      media_type: m.media?.type || null,
     }));
     res.json({ data: enriched, conversation: convo });
   } catch (e) { next(e); }
 }
 
+/** Shared: resolve send target JID from conversation peer cache */
+async function resolveSendTo(accountId, to) {
+  const jid = to.includes('@') ? to : toWaJid(to);
+  const phoneOnly = normalizeWaPhone(to.includes('@') ? to.split('@')[0] : to, {
+    requireCountry: false,
+    throwOnInvalid: false,
+  });
+
+  let sendTo = jid;
+  try {
+    const convoRow = await db('conversations')
+      .where({ ws_account_id: accountId, contact_phone: phoneOnly })
+      .first();
+    if (convoRow?.peer_remote_jid) {
+      sendTo = convoRow.peer_remote_jid;
+    } else if (convoRow?.peer_phone_jid) {
+      sendTo = convoRow.peer_phone_jid;
+    } else {
+      const lastIn = await db('messages')
+        .join('conversations', 'conversations.id', 'messages.conversation_id')
+        .where({
+          'messages.ws_account_id': accountId,
+          'conversations.contact_phone': phoneOnly,
+          'messages.direction': 'in',
+        })
+        .orderBy('messages.timestamp', 'desc')
+        .select('messages.raw')
+        .first();
+      const remote = lastIn?.raw?.key?.remoteJid;
+      const pn = lastIn?.raw?.key?.senderPn || lastIn?.raw?.peer?.jid;
+      if (remote && String(remote).endsWith('@lid')) sendTo = remote;
+      else if (pn && String(pn).includes('@')) sendTo = pn;
+    }
+  } catch (_) { /* ignore */ }
+
+  return { sendTo, phoneOnly, jid };
+}
+
+/**
+ * POST text and/or media.
+ * JSON: { to, text }
+ * multipart: fields to, text/caption + file field "media" or "file"
+ */
 export async function sendMessage(req, res, next) {
   try {
     const { accountId } = req.params;
-    const { to, text } = req.body;
+    const to = req.body?.to;
+    const text = (req.body?.text || req.body?.caption || '').trim();
+    const file = req.file;
 
-    if (!to || !text) return res.status(400).json({ error: 'to and text required' });
+    if (!to) return res.status(400).json({ error: 'to required' });
+    if (!text && !file) return res.status(400).json({ error: 'text or media file required' });
 
     const engine = getSessionEngine();
     let result = null;
     let sendError = null;
     let errorCode = null;
-    const jid = toWaJid(to);
-    const phoneOnly = normalizeWaPhone(to.includes('@') ? to.split('@')[0] : to, {
-      requireCountry: false,
-      throwOnInvalid: false,
-    });
+    const { sendTo, phoneOnly } = await resolveSendTo(accountId, to);
 
-    // Prefer conversation peer cache (filled on inbound) — same JID path receive used
-    let sendTo = jid;
+    let mediaMeta = null;
+    let storeText = text || '';
+
     try {
-      const convoRow = await db('conversations')
-        .where({ ws_account_id: accountId, contact_phone: phoneOnly })
-        .first();
-      if (convoRow?.peer_remote_jid) {
-        sendTo = convoRow.peer_remote_jid;
-        logger.info('[SEND-API] using convo peer_remote_jid', { accountId, phoneOnly, sendTo });
-      } else if (convoRow?.peer_phone_jid) {
-        sendTo = convoRow.peer_phone_jid;
-        logger.info('[SEND-API] using convo peer_phone_jid', { accountId, phoneOnly, sendTo });
+      if (file) {
+        const uploadDir = path.join(config.UPLOAD_DIR || './uploads', 'chat-media');
+        await fs.mkdir(uploadDir, { recursive: true });
+        const ext = path.extname(file.originalname || '') || (
+          file.mimetype?.startsWith('image/') ? '.jpg'
+            : file.mimetype?.startsWith('video/') ? '.mp4' : '.bin'
+        );
+        const fname = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}${ext}`;
+        const fpath = path.join(uploadDir, fname);
+        await fs.writeFile(fpath, file.buffer);
+        const publicPath = `/uploads/chat-media/${fname}`;
+
+        let mediaType = 'document';
+        if (file.mimetype?.startsWith('image/')) mediaType = 'image';
+        else if (file.mimetype?.startsWith('video/')) mediaType = 'video';
+        else if (file.mimetype?.startsWith('audio/')) mediaType = 'audio';
+
+        result = await engine.sendMedia(accountId, sendTo, {
+          buffer: file.buffer,
+          mimetype: file.mimetype,
+          caption: text || '',
+          fileName: file.originalname || fname,
+          mediaType,
+          delayMs: 80 + Math.random() * 200,
+          prepPresence: true,
+        });
+
+        mediaMeta = {
+          type: mediaType,
+          url: publicPath,
+          localPath: publicPath,
+          mimetype: file.mimetype,
+          fileName: file.originalname || fname,
+          size: file.size,
+        };
+        storeText = text || (mediaType === 'image' ? '[image]' : mediaType === 'video' ? '[video]' : `[${mediaType}]`);
       } else {
-        // Fallback: last inbound key
-        const lastIn = await db('messages')
-          .join('conversations', 'conversations.id', 'messages.conversation_id')
-          .where({
-            'messages.ws_account_id': accountId,
-            'conversations.contact_phone': phoneOnly,
-            'messages.direction': 'in',
-          })
-          .orderBy('messages.timestamp', 'desc')
-          .select('messages.raw')
-          .first();
-        const remote = lastIn?.raw?.key?.remoteJid;
-        const pn = lastIn?.raw?.key?.senderPn || lastIn?.raw?.peer?.jid;
-        if (remote && String(remote).endsWith('@lid')) {
-          sendTo = remote;
-          logger.info('[SEND-API] using history LID', { accountId, phoneOnly, sendTo, pn });
-        } else if (pn && String(pn).includes('@')) {
-          sendTo = pn;
-          logger.info('[SEND-API] using history PN', { accountId, phoneOnly, sendTo });
-        }
+        result = await engine.sendText(accountId, sendTo, text, {
+          delayMs: 80 + Math.random() * 200,
+          ackTimeoutMs: 12000,
+          prepPresence: true,
+        });
+        storeText = text;
       }
-    } catch (_) { /* ignore */ }
-
-    try {
-      // Desk: short delay + brief ack wait. Timeout after successful relay is NOT a failure
-      // (see SessionManager.sendText). Real 463 nacks still throw WA_ACK_463.
-      result = await engine.sendText(accountId, sendTo, text, {
-        delayMs: 80 + Math.random() * 200,
-        ackTimeoutMs: 12000,
-        prepPresence: true,
-      });
     } catch (e) {
       sendError = e.message || String(e);
-      // Only label 463 when Baileys/stub actually reported it — never on timeout text
       errorCode = e.code
         || (e.code !== 'WA_ACK_TIMEOUT' && /(?:^|\D)463(?:\D|$)/.test(sendError) ? 'WA_ACK_463' : null)
         || 'SEND_FAILED';
@@ -167,7 +271,7 @@ export async function sendMessage(req, res, next) {
         to: sendTo,
         error: sendError,
         code: errorCode,
-        stack: e.stack,
+        media: !!file,
       });
     }
 
@@ -175,28 +279,67 @@ export async function sendMessage(req, res, next) {
       ? 'failed'
       : (result?.deliveryStatus || 'server_ack');
 
-    // Persist attempt (including failures) so desk history shows what was tried
     const convo = await messagesData.findOrCreateConversation(accountId, phoneOnly);
-    const msgRow = await messagesData.createMessage({
-      conversation_id: convo.id,
-      ws_account_id: accountId,
-      direction: 'out',
-      text,
-      wa_message_id: result?.key?.id || null,
-      timestamp: new Date(),
-      delivery_status: deliveryStatus,
-      fail_reason: sendError || null,
-      wa_status: result?.ack?.status ?? null,
-      raw: {
-        ...(sendError ? { sendError, failed: true, errorCode } : {}),
-        sendTo,
-        message: result ? { conversation: text } : undefined,
-        key: result?.key || undefined,
-        ack: result?.ack || undefined,
-      },
-    });
 
-    // Auto-assign / create contact for this WS number (desk usage)
+    // Soft-fail cleanup: if this text previously failed, upgrade that row instead of stacking
+    let msgRow = null;
+    if (!sendError && storeText) {
+      const recentFail = await db('messages')
+        .where({
+          conversation_id: convo.id,
+          direction: 'out',
+          text: storeText,
+          delivery_status: 'failed',
+        })
+        .where('timestamp', '>', new Date(Date.now() - 5 * 60 * 1000))
+        .orderBy('timestamp', 'desc')
+        .first();
+      if (recentFail) {
+        const [updated] = await db('messages')
+          .where({ id: recentFail.id })
+          .update({
+            delivery_status: deliveryStatus,
+            fail_reason: null,
+            wa_message_id: result?.key?.id || recentFail.wa_message_id,
+            media: mediaMeta || recentFail.media,
+            wa_status: result?.ack?.status ?? null,
+            updated_at: db.fn.now(),
+            raw: {
+              ...(recentFail.raw || {}),
+              recovered: true,
+              sendTo,
+              key: result?.key,
+              ack: result?.ack,
+            },
+          })
+          .returning('*');
+        msgRow = updated;
+        await messagesData.updateConversationLastMessage(convo.id, new Date());
+      }
+    }
+
+    if (!msgRow) {
+      msgRow = await messagesData.createMessage({
+        conversation_id: convo.id,
+        ws_account_id: accountId,
+        direction: 'out',
+        text: storeText,
+        media: mediaMeta,
+        wa_message_id: result?.key?.id || null,
+        timestamp: new Date(),
+        delivery_status: deliveryStatus,
+        fail_reason: sendError || null,
+        wa_status: result?.ack?.status ?? null,
+        raw: {
+          ...(sendError ? { sendError, failed: true, errorCode } : {}),
+          sendTo,
+          media: mediaMeta,
+          key: result?.key || undefined,
+          ack: result?.ack || undefined,
+        },
+      });
+    }
+
     try {
       await db('contacts')
         .insert({
@@ -207,12 +350,9 @@ export async function sendMessage(req, res, next) {
         })
         .onConflict(['phone', 'assigned_ws_account_id'])
         .ignore();
-    } catch (e) {
-      // ignore conflicts / duplicates
-    }
+    } catch (e) { /* ignore */ }
 
     if (sendError) {
-      // Strict: only true WA_ACK_463 gets the reach-out lock copy (not timeouts / soft messages)
       const is463 = errorCode === 'WA_ACK_463';
       const isOffline = /offline|reconnect|NO_AUTH|not live/i.test(sendError);
       return res.status(isOffline ? 503 : 409).json({
@@ -223,10 +363,10 @@ export async function sendMessage(req, res, next) {
         messageId: msgRow?.id || null,
         wa_message_id: result?.key?.id || null,
         hint: is463
-          ? 'WhatsApp reach-out lock (463): message was not accepted for immediate delivery. Reply to contacts who messaged you first, warm the number, or retry later. Do not assume the phone received it.'
+          ? 'WhatsApp reach-out lock (463): message was not accepted for immediate delivery.'
           : isOffline
-            ? 'WhatsApp session is offline or flapping. Click Reconnect and wait for Session OPEN, then retry.'
-            : 'Send failed at the transport layer — check session and logs.',
+            ? 'WhatsApp session is offline. Click Reconnect, then retry.'
+            : 'Send failed at the transport layer.',
       });
     }
 
@@ -236,6 +376,8 @@ export async function sendMessage(req, res, next) {
       delivery_status: deliveryStatus,
       messageId: msgRow?.id || null,
       wa_message_id: result?.key?.id || null,
+      media: mediaMeta,
+      text: storeText,
     });
   } catch (e) { next(e); }
 }
@@ -243,9 +385,15 @@ export async function sendMessage(req, res, next) {
 export async function markRead(req, res, next) {
   try {
     const { accountId, phone } = req.params;
-    const convo = await db('conversations')
+    let convo = await db('conversations')
       .where({ ws_account_id: accountId, contact_phone: phone })
       .first();
+    if (!convo) {
+      convo = await db('conversations')
+        .where({ ws_account_id: accountId, contact_lid: phone })
+        .first()
+        .catch(() => null);
+    }
     if (convo) await messagesData.markConversationRead(convo.id);
     res.json({ success: true });
   } catch (e) { next(e); }

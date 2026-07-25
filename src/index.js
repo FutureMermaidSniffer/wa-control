@@ -254,14 +254,24 @@ sessionEngine.on('messages.upsert', async ({ accountId, messages }) => {
         } catch (_) { /* ignore */ }
       }
 
+      const imgCap = msg.message?.imageMessage?.caption;
+      const vidCap = msg.message?.videoMessage?.caption;
       const text = msg.message?.conversation ||
                    msg.message?.extendedTextMessage?.text ||
+                   imgCap ||
+                   vidCap ||
                    (msg.message?.imageMessage ? '[image]' : '') ||
                    (msg.message?.videoMessage ? '[video]' : '') ||
                    (msg.message?.documentMessage ? '[document]' : '') ||
                    (msg.message?.audioMessage ? '[audio]' : '');
 
       if (!text) continue;
+
+      let mediaMeta = null;
+      if (msg.message?.imageMessage) mediaMeta = { type: 'image', caption: imgCap || null };
+      else if (msg.message?.videoMessage) mediaMeta = { type: 'video', caption: vidCap || null };
+      else if (msg.message?.audioMessage) mediaMeta = { type: 'audio' };
+      else if (msg.message?.documentMessage) mediaMeta = { type: 'document' };
 
       // Group threads: conversation name = subject; bubble text shows "Sender: message"
       let storeText = text;
@@ -294,6 +304,7 @@ sessionEngine.on('messages.upsert', async ({ accountId, messages }) => {
         ws_account_id: accountId,
         direction,
         text: storeText,
+        media: mediaMeta,
         wa_message_id: msg.key?.id,
         timestamp: msg.messageTimestamp ? new Date(Number(msg.messageTimestamp) * 1000) : new Date(),
         // fromMe upsert after successful desk send → at least server-accepted echo

@@ -302,11 +302,45 @@ export async function updateMessageDeliveryByWaId(wsAccountId, waMessageId, {
   return updated || row;
 }
 
-export async function listMessages(convoId, limit = 50) {
-  return db('messages')
+/**
+ * List messages for a conversation.
+ * Collapses "failed then success" twins: consecutive outbound same text within 3 min
+ * keeps the successful (or latest) row so the desk does not show Failed + ✓✓ duplicates.
+ */
+export async function listMessages(convoId, limit = 100) {
+  const rows = await db('messages')
     .where({ conversation_id: convoId })
     .orderBy('timestamp', 'asc')
-    .limit(limit);
+    .limit(Math.min(Number(limit) || 100, 300));
+
+  const out = [];
+  for (const m of rows) {
+    const prev = out[out.length - 1];
+    if (
+      prev
+      && prev.direction === 'out'
+      && m.direction === 'out'
+      && String(prev.text || '') === String(m.text || '')
+      && prev.text
+      && Math.abs(new Date(m.timestamp) - new Date(prev.timestamp)) < 3 * 60 * 1000
+    ) {
+      const prevFailed = prev.delivery_status === 'failed';
+      const curFailed = m.delivery_status === 'failed';
+      // Prefer non-failed; if both failed keep latest; if both ok keep latest
+      if (prevFailed && !curFailed) {
+        out[out.length - 1] = m;
+        continue;
+      }
+      if (!prevFailed && curFailed) {
+        continue; // drop failed after success
+      }
+      // same fate — keep latest
+      out[out.length - 1] = m;
+      continue;
+    }
+    out.push(m);
+  }
+  return out;
 }
 
 export async function markConversationRead(convoId) {

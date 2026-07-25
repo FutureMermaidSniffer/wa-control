@@ -2416,23 +2416,159 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * Fetch contact profile picture URL (Baileys). May fail if privacy blocks.
+   * Fetch contact profile picture URL (Baileys). Tries phone JID then LID if known.
    * @returns {Promise<string|null>} temporary HTTPS URL
    */
   async getProfilePictureUrl(accountId, phoneOrJid, type = 'preview') {
     const sock = await this.getOrCreateSocket(accountId);
-    let jid = String(phoneOrJid || '').trim();
-    if (!jid.includes('@')) {
-      const digits = normalizeWaPhone(jid, { throwOnInvalid: false, requireCountry: false });
-      jid = `${digits}@s.whatsapp.net`;
+    const raw = String(phoneOrJid || '').trim();
+    const candidates = [];
+    if (raw.includes('@')) {
+      candidates.push(raw);
+    } else {
+      const digits = normalizeWaPhone(raw, { throwOnInvalid: false, requireCountry: false });
+      if (digits) {
+        candidates.push(`${digits}@s.whatsapp.net`);
+        // Conversation may map LID → phone; also try peer cache reverse
+        try {
+          const convo = await this.db('conversations')
+            .where({ ws_account_id: accountId })
+            .where(function () {
+              this.where({ contact_phone: digits })
+                .orWhere({ contact_lid: digits })
+                .orWhere({ peer_remote_jid: `${digits}@lid` });
+            })
+            .first();
+          if (convo?.peer_phone_jid) candidates.unshift(convo.peer_phone_jid);
+          if (convo?.peer_remote_jid) candidates.push(convo.peer_remote_jid);
+          if (convo?.contact_phone && convo.contact_phone !== digits) {
+            candidates.unshift(`${convo.contact_phone}@s.whatsapp.net`);
+          }
+        } catch (_) { /* ignore */ }
+      }
     }
+    const seen = new Set();
+    for (const jid of candidates) {
+      if (!jid || seen.has(jid)) continue;
+      seen.add(jid);
+      try {
+        const url = await sock.profilePictureUrl(jid, type);
+        if (url) return url;
+      } catch (e) {
+        logger.debug?.(`[AVATAR] ${jid}: ${e.message}`);
+      }
+    }
+    logger.info(`No profile picture for ${raw}`);
+    return null;
+  }
+
+  /**
+   * Send image or video (or generic document) with optional caption.
+   * Reuses send JID resolution + ack wait from text path.
+   */
+  async sendMedia(accountId, to, {
+    buffer,
+    mimetype = 'application/octet-stream',
+    caption = '',
+    fileName = 'file',
+    mediaType = null, // 'image' | 'video' | 'audio' | 'document'
+    delayMs = 0,
+    waitAck = true,
+    ackTimeoutMs = 20000,
+    prepPresence = true,
+  } = {}) {
+    if (!buffer || !Buffer.isBuffer(buffer)) {
+      throw new Error('sendMedia: buffer required');
+    }
+    let sock;
+    if (this.isSocketLive(accountId)) {
+      sock = activeSockets.get(accountId).sock;
+    } else {
+      try { await this.reconnectAccount(accountId); } catch (e) {
+        if (e.code === 'NO_AUTH') throw e;
+      }
+      sock = await this.getOrCreateSocket(accountId, { waitOpen: true, openTimeoutMs: 45000 });
+    }
+    if (!sock?.ws?.isOpen) {
+      throw new Error('WhatsApp session is offline — use Reconnect, then try again');
+    }
+
+    const jid = await this._resolveSendJid(sock, accountId, to);
+    if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
+
+    const mt = String(mimetype || '').toLowerCase();
+    let kind = mediaType;
+    if (!kind) {
+      if (mt.startsWith('image/')) kind = 'image';
+      else if (mt.startsWith('video/')) kind = 'video';
+      else if (mt.startsWith('audio/')) kind = 'audio';
+      else kind = 'document';
+    }
+
+    let content;
+    if (kind === 'image') {
+      content = { image: buffer, caption: caption || undefined, mimetype: mt || 'image/jpeg' };
+    } else if (kind === 'video') {
+      content = { video: buffer, caption: caption || undefined, mimetype: mt || 'video/mp4' };
+    } else if (kind === 'audio') {
+      content = { audio: buffer, mimetype: mt || 'audio/ogg; codecs=opus', ptt: false };
+    } else {
+      content = {
+        document: buffer,
+        mimetype: mt || 'application/octet-stream',
+        fileName: fileName || 'file',
+        caption: caption || undefined,
+      };
+    }
+
+    if (prepPresence) await this._prepSendPresence(sock, jid);
+
+    const msgId = generateMessageIDV2(sock.user?.id);
+    let ackPromise = null;
+    if (waitAck) {
+      ackPromise = this._waitForSendAck(msgId, ackTimeoutMs, {});
+    }
+
+    const t0 = Date.now();
+    let result;
     try {
-      const url = await sock.profilePictureUrl(jid, type);
-      return url || null;
-    } catch (e) {
-      logger.info(`No profile picture for ${jid}: ${e.message}`);
-      return null;
+      result = await sock.sendMessage(jid, content, { messageId: msgId });
+    } catch (sendErr) {
+      if (ackPromise) ackPromise.catch(() => {});
+      if (this._sendAckWaiters?.has(msgId)) {
+        try { this._sendAckWaiters.get(msgId).reject(sendErr); } catch { /* ignore */ }
+      }
+      throw sendErr;
     }
+
+    const usedId = result?.key?.id || msgId;
+    result = result || {};
+    result.deliveryStatus = 'server_ack';
+    result.mediaKind = kind;
+
+    if (ackPromise) {
+      try {
+        if (usedId !== msgId && this._sendAckWaiters?.has(msgId)) {
+          const w = this._sendAckWaiters.get(msgId);
+          this._sendAckWaiters.delete(msgId);
+          this._sendAckWaiters.set(usedId, w);
+        }
+        const ack = await ackPromise;
+        result.ack = ack;
+        if (typeof ack?.status === 'number' && ack.status >= WAMessageStatus.DELIVERY_ACK) {
+          result.deliveryStatus = 'delivered';
+        } else {
+          result.deliveryStatus = 'server_ack';
+        }
+      } catch (ackErr) {
+        // Soft: media already relayed
+        if (ackErr.code === 'WA_ACK_463' || /463/.test(ackErr.message || '')) throw ackErr;
+        logger.warn(`[SEND-MEDIA] ack: ${ackErr.message}`);
+      }
+    }
+
+    logger.info('[SEND-MEDIA] ok', { accountId, to: jid, kind, id: usedId, ms: Date.now() - t0 });
+    return result;
   }
 
   /**

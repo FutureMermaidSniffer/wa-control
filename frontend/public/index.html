@@ -155,6 +155,16 @@
     .wa-bubble-status.pending { color: #8696a0; }
     .wa-bubble-status.server_ack, .wa-bubble-status.delivered, .wa-bubble-status.read { color: #53bdeb; }
     .wa-bubble.failed { opacity: 0.85; border: 1px solid #fca5a5; }
+    .wa-bubble-media { margin: 2px 0 6px; border-radius: 6px; overflow: hidden; max-width: 280px; }
+    .wa-bubble-media img, .wa-bubble-media video {
+      display: block; max-width: 100%; max-height: 240px; border-radius: 6px; background: #000;
+    }
+    .wa-attach-preview {
+      display: none; align-items: center; gap: 8px; padding: 6px 12px; background: #e9edef;
+      border-top: 1px solid #d1d7db; font-size: 12px; color: #111b21;
+    }
+    .wa-attach-preview.open { display: flex; }
+    .wa-attach-preview img, .wa-attach-preview video { max-height: 48px; max-width: 72px; border-radius: 4px; }
     .wa-composer {
       display: flex; align-items: flex-end; gap: 8px; padding: 10px 12px; background: #f0f2f5;
       border-top: 1px solid #e9edef; flex-shrink: 0; position: relative;
@@ -403,8 +413,15 @@
               <div style="font-size:12px">Pick an account, then a conversation — or start a new chat</div>
             </div>
           </div>
+          <div class="wa-attach-preview" id="wa-attach-preview">
+            <div id="wa-attach-thumb"></div>
+            <span id="wa-attach-label" style="flex:1">Attachment</span>
+            <button type="button" class="wa-icon-btn" onclick="clearDeskAttach()" title="Remove">✕</button>
+          </div>
           <div class="wa-composer" id="wa-composer" style="display:none">
             <div class="wa-emoji-panel" id="wa-emoji-panel"></div>
+            <input type="file" id="desk-media-input" accept="image/*,video/*" style="display:none" onchange="onDeskMediaPicked(this)" />
+            <button type="button" class="wa-icon-btn" onclick="document.getElementById('desk-media-input').click()" title="Attach image or video">📎</button>
             <button type="button" class="wa-icon-btn" onclick="toggleEmojiPicker()" title="Emoji">😊</button>
             <select id="desk-quick" style="max-width:100px;font-size:12px;border-radius:8px" title="Quick replies" onchange="insertQuickReply()"></select>
             <textarea id="desk-input" rows="1" placeholder="Type a message" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();deskSend();}"></textarea>
@@ -3074,22 +3091,45 @@
     }).join('');
   }
 
-  async function loadConvoAvatar(phone) {
+  async function loadConvoAvatar(phone, force = false) {
     if (!currentDeskAccount || !phone) return;
+    // Groups / pure group jids have no user pic
+    if (String(phone).includes('@g.us')) return;
     const key = `${currentDeskAccount}:${phone}`;
-    if (avatarUrlCache[key] !== undefined) return;
+    if (!force && avatarUrlCache[key] !== undefined) {
+      // Still refresh header if we already know the URL
+      if (avatarUrlCache[key] && currentDeskPhone === phone) {
+        const chatAv = document.getElementById('wa-chat-avatar');
+        if (chatAv) chatAv.innerHTML = `<img src="${escapeHtml(avatarUrlCache[key])}" alt=""/>`;
+      }
+      return;
+    }
     try {
-      const res = await fetch(API + `/accounts/${currentDeskAccount}/contacts/${encodeURIComponent(phone)}/avatar`, { headers: authHeaders() });
-      if (!res.ok) { avatarUrlCache[key] = null; return; }
+      const res = await fetch(
+        API + `/accounts/${currentDeskAccount}/contacts/${encodeURIComponent(phone)}/avatar`,
+        { headers: authHeaders() }
+      );
+      if (!res.ok) {
+        avatarUrlCache[key] = null;
+        return;
+      }
       const j = await res.json();
-      avatarUrlCache[key] = j.url || null;
-      // Update DOM avatars
-      document.querySelectorAll(`[data-av="${key}"]`).forEach(el => {
-        if (j.url) el.innerHTML = `<img src="${escapeHtml(j.url)}" alt="" onerror="this.remove()"/>`;
+      const url = j.url || null;
+      avatarUrlCache[key] = url;
+      // If API resolved a canonical phone (from LID), cache under that key too
+      if (j.phone && j.phone !== phone) {
+        avatarUrlCache[`${currentDeskAccount}:${j.phone}`] = url;
+      }
+      document.querySelectorAll(`[data-av="${CSS.escape(key)}"], [data-av="${key}"]`).forEach(el => {
+        if (url) el.innerHTML = `<img src="${escapeHtml(url)}" alt="" onerror="this.parentNode.textContent='?'"/>`;
+      });
+      // Also match list rows by data-phone
+      document.querySelectorAll(`.wa-convo-row[data-phone="${CSS.escape(phone)}"] .wa-avatar`).forEach(el => {
+        if (url) el.innerHTML = `<img src="${escapeHtml(url)}" alt="" onerror="this.remove()"/>`;
       });
       const chatAv = document.getElementById('wa-chat-avatar');
-      if (chatAv && currentDeskPhone === phone && j.url) {
-        chatAv.innerHTML = `<img src="${escapeHtml(j.url)}" alt=""/>`;
+      if (chatAv && currentDeskPhone === phone && url) {
+        chatAv.innerHTML = `<img src="${escapeHtml(url)}" alt=""/>`;
       }
     } catch {
       avatarUrlCache[key] = null;
@@ -3099,6 +3139,7 @@
   async function selectDeskConversation(phone, name, isGroup) {
     currentDeskPhone = phone;
     currentDeskName = name || null;
+    clearDeskAttach();
     const group = isGroup === true || isGroup === '1' || String(phone || '').includes('@g.us');
     const title = name || (group ? 'Group' : formatPeerPhone(phone));
     document.getElementById('desk-current-phone').textContent = group ? `👥 ${title}` : title;
@@ -3114,6 +3155,7 @@
       av.innerHTML = `<img src="${escapeHtml(avatarUrlCache[key])}" alt=""/>`;
     } else {
       av.textContent = initialsFrom(title);
+      // Always try to load recipient profile picture for this chat
       loadConvoAvatar(phone);
     }
     document.querySelectorAll('.wa-convo-row').forEach(el => {
@@ -3135,17 +3177,66 @@
     }
   }
 
+  function mediaUrlFromMsg(m) {
+    if (!m) return null;
+    if (m.media_url) return m.media_url;
+    if (m.media?.url) return m.media.url;
+    if (m.media?.localPath) return m.media.localPath;
+    return null;
+  }
+  function mediaTypeFromMsg(m) {
+    return m?.media_type || m?.media?.type || null;
+  }
+
   function appendBubble(box, m) {
     const row = document.createElement('div');
     row.className = `wa-bubble-row ${m.direction === 'out' ? 'out' : 'in'}`;
     if (m.wa_message_id) row.dataset.waId = m.wa_message_id;
     if (m.id) row.dataset.msgId = m.id;
+    if (m.clientId) row.dataset.clientId = m.clientId;
+    if (m.text) row.dataset.text = m.text;
     const bubble = document.createElement('div');
     const failed = m.delivery_status === 'failed' || (m.text || '').startsWith('[FAILED]');
     bubble.className = `wa-bubble ${m.direction === 'out' ? 'out' : 'in'}${failed ? ' failed' : ''}`;
-    const text = document.createElement('div');
-    text.className = 'wa-bubble-text';
-    text.textContent = m.text || '[media]';
+
+    const mediaUrl = mediaUrlFromMsg(m);
+    const mediaType = mediaTypeFromMsg(m);
+    if (mediaUrl && (mediaType === 'image' || /\.(jpe?g|png|gif|webp)(\?|$)/i.test(mediaUrl))) {
+      const wrap = document.createElement('div');
+      wrap.className = 'wa-bubble-media';
+      const img = document.createElement('img');
+      img.src = mediaUrl;
+      img.alt = 'image';
+      img.loading = 'lazy';
+      img.onclick = () => window.open(mediaUrl, '_blank');
+      wrap.appendChild(img);
+      bubble.appendChild(wrap);
+    } else if (mediaUrl && (mediaType === 'video' || /\.(mp4|webm|mov)(\?|$)/i.test(mediaUrl))) {
+      const wrap = document.createElement('div');
+      wrap.className = 'wa-bubble-media';
+      const vid = document.createElement('video');
+      vid.src = mediaUrl;
+      vid.controls = true;
+      vid.preload = 'metadata';
+      wrap.appendChild(vid);
+      bubble.appendChild(wrap);
+    }
+
+    const bodyText = m.text || '';
+    // Hide placeholder tags when we already show media
+    const hidePlaceholder = mediaUrl && /^\[(image|video|audio|document|media)\]$/i.test(bodyText.trim());
+    if (bodyText && !hidePlaceholder) {
+      const text = document.createElement('div');
+      text.className = 'wa-bubble-text';
+      text.textContent = bodyText;
+      bubble.appendChild(text);
+    } else if (!mediaUrl) {
+      const text = document.createElement('div');
+      text.className = 'wa-bubble-text';
+      text.textContent = bodyText || '[media]';
+      bubble.appendChild(text);
+    }
+
     const time = document.createElement('div');
     time.className = 'wa-bubble-time';
     const timeSpan = document.createElement('span');
@@ -3158,19 +3249,26 @@
       st.textContent = deliveryStatusLabel(m.delivery_status || 'pending');
       time.appendChild(st);
     }
-    bubble.appendChild(text);
     bubble.appendChild(time);
     row.appendChild(bubble);
     box.appendChild(row);
     return row;
   }
 
-  function updateBubbleStatus(waMessageId, deliveryStatus) {
-    if (!waMessageId) return;
+  function updateBubbleStatus(rowOrWaId, deliveryStatus, extra = {}) {
     const box = document.getElementById('desk-messages');
     if (!box) return;
-    const row = box.querySelector(`.wa-bubble-row[data-wa-id="${CSS.escape(waMessageId)}"]`);
+    let row = null;
+    if (rowOrWaId && rowOrWaId.nodeType === 1) row = rowOrWaId;
+    else if (rowOrWaId) {
+      row = box.querySelector(`.wa-bubble-row[data-wa-id="${CSS.escape(String(rowOrWaId))}"]`);
+    }
+    if (!row && extra.clientId) {
+      row = box.querySelector(`.wa-bubble-row[data-client-id="${CSS.escape(extra.clientId)}"]`);
+    }
     if (!row) return;
+    if (extra.waMessageId) row.dataset.waId = extra.waMessageId;
+    if (extra.messageId) row.dataset.msgId = extra.messageId;
     const st = row.querySelector('[data-role="status"]');
     const bubble = row.querySelector('.wa-bubble');
     if (st) {
@@ -3181,6 +3279,33 @@
       if (deliveryStatus === 'failed') bubble.classList.add('failed');
       else bubble.classList.remove('failed');
     }
+  }
+
+  let deskPendingFile = null;
+  function onDeskMediaPicked(input) {
+    const file = input?.files?.[0];
+    if (!file) return;
+    deskPendingFile = file;
+    const prev = document.getElementById('wa-attach-preview');
+    const thumb = document.getElementById('wa-attach-thumb');
+    const label = document.getElementById('wa-attach-label');
+    prev.classList.add('open');
+    const url = URL.createObjectURL(file);
+    if (file.type.startsWith('video/')) {
+      thumb.innerHTML = `<video src="${url}" muted></video>`;
+      label.textContent = `Video · ${file.name} (${Math.round(file.size / 1024)} KB)`;
+    } else {
+      thumb.innerHTML = `<img src="${url}" alt=""/>`;
+      label.textContent = `Image · ${file.name} (${Math.round(file.size / 1024)} KB)`;
+    }
+  }
+  function clearDeskAttach() {
+    deskPendingFile = null;
+    const input = document.getElementById('desk-media-input');
+    if (input) input.value = '';
+    document.getElementById('wa-attach-preview')?.classList.remove('open');
+    const thumb = document.getElementById('wa-attach-thumb');
+    if (thumb) thumb.innerHTML = '';
   }
 
   async function refreshDeskMessages() {
@@ -3229,52 +3354,98 @@
     }
     const input = document.getElementById('desk-input');
     const text = (input.value || '').trim();
-    if (!text) return;
-    // Groups keep full JID; 1:1 use phone@s.whatsapp.net
+    const file = deskPendingFile;
+    if (!text && !file) return;
+
     let to = currentDeskPhone;
     if (String(to).includes('@g.us')) {
       /* group jid as-is */
     } else if (!String(to).includes('@')) {
       to = `${normalizeDeskPhone(to)}@s.whatsapp.net`;
     }
-    // Optimistic bubble (pending until WA server ack)
+
     const box = document.getElementById('desk-messages');
     if (box.querySelector('.wa-empty')) box.innerHTML = '';
-    const row = appendBubble(box, {
-      direction: 'out',
-      text,
-      timestamp: new Date().toISOString(),
-      delivery_status: 'pending',
-    });
+
+    // Streamline: reuse last failed bubble with same text instead of stacking Failed + new send
+    const previewText = text || (file?.type?.startsWith('video/') ? '[video]' : file ? '[image]' : '');
+    let row = null;
+    const last = box.querySelector('.wa-bubble-row.out:last-child');
+    if (
+      last
+      && last.querySelector('.wa-bubble.failed')
+      && last.dataset.text === previewText
+      && !file
+    ) {
+      row = last;
+      updateBubbleStatus(row, 'pending');
+      row.querySelector('.wa-bubble')?.classList.remove('failed');
+    } else {
+      const clientId = 'c_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+      const opt = {
+        direction: 'out',
+        text: previewText,
+        timestamp: new Date().toISOString(),
+        delivery_status: 'pending',
+        clientId,
+      };
+      if (file) {
+        opt.media_url = URL.createObjectURL(file);
+        opt.media_type = file.type.startsWith('video/') ? 'video' : 'image';
+      }
+      row = appendBubble(box, opt);
+    }
     box.scrollTop = box.scrollHeight;
     input.value = '';
-    const res = await fetch(API + `/accounts/${currentDeskAccount}/send`, {
-      method: 'POST', headers: authHeaders(),
-      body: JSON.stringify({ to, text })
-    });
-    const j = await res.json().catch(() => ({}));
-    if (j.wa_message_id && row) row.dataset.waId = j.wa_message_id;
-    if (j.messageId && row) row.dataset.msgId = j.messageId;
+    const sentFile = file;
+    clearDeskAttach();
+
+    let res;
+    let j = {};
+    try {
+      if (sentFile) {
+        const fd = new FormData();
+        fd.append('to', to);
+        if (text) fd.append('text', text);
+        fd.append('media', sentFile);
+        res = await fetch(API + `/accounts/${currentDeskAccount}/send`, {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + TOKEN },
+          body: fd,
+        });
+      } else {
+        res = await fetch(API + `/accounts/${currentDeskAccount}/send`, {
+          method: 'POST', headers: authHeaders(),
+          body: JSON.stringify({ to, text })
+        });
+      }
+      j = await res.json().catch(() => ({}));
+    } catch (e) {
+      updateBubbleStatus(row, 'failed');
+      showToast('Network error: ' + e.message, 'error');
+      return;
+    }
+
     if (!res.ok) {
-      // Only treat true WA_ACK_463 as reach-out lock — never timeout/soft messages
       const is463 = j.code === 'WA_ACK_463';
       const hint = j.hint || (is463
         ? 'WhatsApp reach-out lock — message not accepted for immediate delivery'
         : 'check session (Reconnect) and logs');
       showToast((j.error || 'Send failed') + (hint ? ' — ' + hint : ''), 'error', 9000);
-      updateBubbleStatus(j.wa_message_id || row?.dataset?.waId, 'failed');
+      updateBubbleStatus(row, 'failed', { waMessageId: j.wa_message_id, messageId: j.messageId });
       const st = row?.querySelector('[data-role="status"]');
-      if (st) {
-        st.className = 'wa-bubble-status failed';
-        st.textContent = is463 ? 'Blocked' : 'Failed';
-      }
-      row?.querySelector('.wa-bubble')?.classList.add('failed');
+      if (st) st.textContent = is463 ? 'Blocked' : 'Failed';
     } else {
       const st = j.delivery_status || 'server_ack';
-      updateBubbleStatus(j.wa_message_id, st);
-      showToast(st === 'delivered' ? 'Delivered' : 'Sent to WhatsApp', 'success', 1500);
+      // If server returned a public media URL, refresh bubble media from it
+      if (j.media?.url) {
+        const mediaEl = row.querySelector('.wa-bubble-media img, .wa-bubble-media video');
+        if (mediaEl) mediaEl.src = j.media.url;
+      }
+      updateBubbleStatus(row, st, { waMessageId: j.wa_message_id, messageId: j.messageId });
+      // Quiet success — avoid toast spam on every message
     }
-    setTimeout(() => loadDeskConversations(), 500);
+    setTimeout(() => loadDeskConversations(), 400);
   }
 
   async function deskMarkRead() {
@@ -3364,6 +3535,20 @@
             // Avoid duplicate bubble if we already have this WA id (desk send + upsert echo)
             if (data.wa_message_id && box.querySelector(`.wa-bubble-row[data-wa-id="${CSS.escape(data.wa_message_id)}"]`)) {
               updateBubbleStatus(data.wa_message_id, data.delivery_status || 'server_ack');
+              return;
+            }
+            // Don't add a second bubble if last out bubble is same text (desk send + upsert echo)
+            const lastOut = box.querySelector('.wa-bubble-row.out:last-child');
+            if (
+              data.direction === 'out'
+              && lastOut
+              && lastOut.dataset.text === data.text
+              && !lastOut.querySelector('.wa-bubble.failed')
+            ) {
+              if (data.wa_message_id) lastOut.dataset.waId = data.wa_message_id;
+              updateBubbleStatus(lastOut, data.delivery_status || 'server_ack', {
+                waMessageId: data.wa_message_id,
+              });
               return;
             }
             if (box.querySelector('.wa-empty')) box.innerHTML = '';
