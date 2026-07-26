@@ -196,6 +196,16 @@ export class SessionEngine {
     return this.manager.sendText(accountId, to, text, options);
   }
 
+  /**
+   * Save peer as WA contact (warming longevity handshake).
+   * @param {string} accountId
+   * @param {string} phoneOrJid
+   * @param {{ fullName?: string, firstName?: string, saveOnPrimary?: boolean }} [opts]
+   */
+  async saveContact(accountId, phoneOrJid, opts = {}) {
+    return this.manager.saveContact(accountId, phoneOrJid, opts);
+  }
+
   async sendMedia(accountId, to, opts = {}) {
     return this.manager.sendMedia(accountId, to, opts);
   }

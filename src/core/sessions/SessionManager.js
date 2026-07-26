@@ -2416,6 +2416,63 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * Save a peer as a WhatsApp contact (app-state sync).
+   * Used by warming first-message longevity handshake.
+   * @param {string} accountId
+   * @param {string} phoneOrJid
+   * @param {{ fullName?: string, firstName?: string, saveOnPrimary?: boolean }} [opts]
+   */
+  async saveContact(accountId, phoneOrJid, opts = {}) {
+    let sock;
+    if (this.isSocketLive(accountId)) {
+      sock = activeSockets.get(accountId).sock;
+    } else {
+      try {
+        await this.reconnectAccount(accountId);
+      } catch (e) {
+        if (e.code === 'NO_AUTH') throw e;
+      }
+      sock = await this.getOrCreateSocket(accountId, {
+        waitOpen: true,
+        openTimeoutMs: opts.openTimeoutMs || 45000,
+      });
+    }
+    if (!sock?.ws?.isOpen) {
+      throw new Error('WhatsApp session is offline — cannot save contact');
+    }
+    if (typeof sock.addOrEditContact !== 'function') {
+      throw new Error('addOrEditContact not available on this Baileys socket');
+    }
+
+    const raw = String(phoneOrJid || '').trim();
+    let jid = raw;
+    if (!raw.includes('@')) {
+      const digits = String(raw).replace(/\D/g, '');
+      if (digits.length < 8) throw new Error('Invalid phone for saveContact');
+      jid = `${digits}@s.whatsapp.net`;
+    }
+
+    const jidUser = String(jid).split('@')[0].replace(/\D/g, '') || 'Contact';
+    const fullName = (opts.fullName || opts.firstName || jidUser).toString().slice(0, 64);
+    const firstName = (opts.firstName || fullName).toString().slice(0, 64);
+    const saveOnPrimary = opts.saveOnPrimary !== false;
+
+    await sock.addOrEditContact(jid, {
+      fullName,
+      firstName,
+      saveOnPrimaryAddressbook: saveOnPrimary,
+      pnJid: jid.endsWith('@s.whatsapp.net') ? jid : undefined,
+    });
+
+    logger.info(`[CONTACT] saved peer for account ${accountId}`, {
+      jid,
+      fullName: fullName.slice(0, 20),
+      saveOnPrimary,
+    });
+    return { jid, fullName, saved: true };
+  }
+
+  /**
    * Fetch contact profile picture URL (Baileys). Tries phone JID then LID if known.
    * @returns {Promise<string|null>} temporary HTTPS URL
    */

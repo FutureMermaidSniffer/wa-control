@@ -128,10 +128,17 @@ setSessionManager(sessionEngine);
 
 // Jobs / workers (BullMQ + Redis) — after engine is registered
 import { startWarmingWorker } from './jobs/workers/warming.worker.js';
-import { closeQueues } from './jobs/queues.js';
+import { closeQueues, reconcileWarmingJobs } from './jobs/queues.js';
+import warmingData from './data/warming.data.js';
 let warmingWorker;
 try {
   warmingWorker = startWarmingWorker();
+  // Re-queue active warming tasks that lost delayed jobs on restart
+  reconcileWarmingJobs(() => warmingData.listActiveTasks())
+    .then((r) => {
+      if (r.scheduled) logger.info('Warming reconciler done', r);
+    })
+    .catch((e) => logger.warn('Warming reconciler failed', e.message));
 } catch (e) {
   logger.warn('Could not start warming worker (Redis may be down):', e.message);
 }

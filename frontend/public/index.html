@@ -461,19 +461,21 @@
       <!-- Active warming tasks -->
       <div class="section-title">🔄 Currently Warming</div>
       <table id="warming-table">
-        <thead><tr><th>Phone</th><th>Progress</th><th>Tier</th><th>Mode</th><th>Status</th><th>Actions</th></tr></thead>
+        <thead><tr><th>Phone</th><th>Progress</th><th>Session</th><th>Tier</th><th>Mode</th><th>Status</th><th>Actions</th></tr></thead>
         <tbody></tbody>
       </table>
 
       <!-- Peer warming info -->
       <div class="section-title" style="margin-top:16px">ℹ️ Warming Algorithm</div>
       <div style="font-size:12px;color:#666;line-height:1.7;background:#f9fafb;padding:10px;border-radius:6px">
-        <strong>How peer warming works:</strong><br>
-        • <strong>Day 1-3 (Light)</strong>: Profile (nick + avatar) update, presence pings, self-messages.<br>
-        • <strong>Day 4-7 (Medium)</strong>: + Peer messages — numbers in the warm pool send real messages to each other. Warm group chat.<br>
-        • <strong>Day 8+ (Active)</strong>: + Audio voice notes between peers, higher group activity, composing presence before messages.<br>
-        <strong>Anti-ban</strong>: Health score gating (pauses if &lt;30), daily cap, global ban signal detection (pause all if &gt;5 accounts error/hour).<br>
-        <strong>Audio notes</strong>: Add <code>.ogg</code> files to Materials as type <code>audio</code> — they'll be sent as voice notes between warming peers.
+        <strong>Calendar-day sessions (real time):</strong> each job is one <em>session</em>, not a whole day. Sessions are spaced hours apart (normal ~6–10h, fast ~3–5h). A day completes after all planned sessions <em>and</em> the day span (~16–22h).<br>
+        <strong>1-day warm</strong>: 3–4 sessions over one real day (bootstrap → midday → evening), then graduate to active.<br>
+        <strong>Longevity handshake</strong>: on first message between pool peers, both sides <strong>save each other as contacts</strong> (<code>saveOnPrimaryAddressbook</code>) then exchange intro texts — only once per pair.<br>
+        • <strong>Day 1-3 (Light)</strong>: Profile, presence, peer handshake / light peer chat.<br>
+        • <strong>Day 4-7 (Medium)</strong>: + Warm group messages, more peer volume.<br>
+        • <strong>Day 8+ (Active)</strong>: + Voice notes, higher group activity.<br>
+        <strong>Anti-ban</strong>: Health score gating (&lt;30 pauses), daily peer cap, global ban signal (&gt;5 errors/hour).<br>
+        <strong>Dev only</strong>: set <code>WARMING_TIME_SCALE=0.001</code> to compress hour-scale delays for testing.
       </div>
     </div>
 
@@ -1904,16 +1906,21 @@
     const tbody = document.querySelector('#warming-table tbody');
     tbody.innerHTML = '';
     if (!tasks.length) {
-      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#888">No warming tasks yet.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#888">No warming tasks yet.</td></tr>';
       return;
     }
 
     tasks.forEach(t => {
       const progress = t.progress_days || 0;
       const target = t.target_days || 10;
-      const pct = Math.min(100, Math.round((progress / target) * 100));
+      const perDay = t.sessions_per_day_effective || t.sessions_per_day || 3;
+      const sessDone = t.sessions_completed_today || 0;
+      // Day progress + intra-day session fraction
+      const dayFrac = Math.min(1, sessDone / Math.max(1, perDay));
+      const pct = Math.min(100, Math.round(((progress + dayFrac) / target) * 100));
       const day = progress;
       const tier = day < 3 ? '🌱 Light' : (day < 7 ? '🌿 Medium' : '🔥 Active');
+      const sessionLabel = t.session_label || `Day ${day + 1} · ${sessDone}/${perDay}`;
       const tr = document.createElement('tr');
       let actions = '';
       if (t.status === 'executing' || t.status === 'pending') {
@@ -1927,9 +1934,10 @@
         <td>
           <div style="display:flex;align-items:center;gap:8px">
             <div class="prog-bar" style="flex:1"><div class="fill" style="width:${pct}%"></div></div>
-            <span style="font-size:11px;color:#888">${progress}/${target}</span>
+            <span style="font-size:11px;color:#888">${progress}/${target}d</span>
           </div>
         </td>
+        <td style="font-size:11px;color:#555;white-space:nowrap">${escapeHtml(sessionLabel)}</td>
         <td style="font-size:12px">${tier}</td>
         <td><span class="badge ${t.mode}">${t.mode}</span></td>
         <td><span class="badge ${t.status}">${t.status}</span></td>
@@ -1975,15 +1983,18 @@
       message: `Start warming for <strong>${eligible.length}</strong> eligible accounts (linked/active)?`,
       type: 'info',
       inputs: [
-        { name: 'mode', label: 'Mode', type: 'select', options: [{ value: 'normal', label: 'Normal (10 days)' }, { value: 'fast_warm', label: 'Fast Warm (5 days)' }] },
-        { name: 'days', label: 'Target Days', type: 'number', value: '10' }
+        { name: 'mode', label: 'Mode', type: 'select', options: [
+          { value: 'normal', label: 'Normal (real calendar gaps)' },
+          { value: 'fast_warm', label: 'Fast Warm (denser, still real hours)' }
+        ]},
+        { name: 'days', label: 'Target Days (1 = one real day)', type: 'number', value: '1' }
       ],
       onConfirm: async (vals) => {
         let count = 0;
         for (const a of eligible) {
           const r = await fetch(API + '/warming/enter', {
             method: 'POST', headers: authHeaders(),
-            body: JSON.stringify({ ws_account_id: a.id, mode: vals.mode, target_days: parseInt(vals.days) || 10 })
+            body: JSON.stringify({ ws_account_id: a.id, mode: vals.mode, target_days: parseInt(vals.days) || 1 })
           });
           if (r.ok) count++;
         }
@@ -2022,18 +2033,25 @@
   async function enterWarming(accountId) {
     showNotification({
       title: '🔥 Enter Warming Pool',
-      message: 'Choose mode. Fast warm = more aggressive but still safe.',
+      message: 'Sessions run over <strong>real calendar time</strong> (hours between sessions). Use <strong>1 day</strong> for a short warm. Fast = denser sessions, still not instant.',
       type: 'info',
       inputs: [
-        { name: 'mode', label: 'Mode', type: 'select', options: [{ value: 'normal', label: 'Normal (~10 days)' }, { value: 'fast_warm', label: 'Fast Warm (~5 days)' }] },
-        { name: 'target_days', label: 'Target Days', type: 'number', value: '10' }
+        { name: 'mode', label: 'Mode', type: 'select', options: [
+          { value: 'normal', label: 'Normal (~6–10h between sessions)' },
+          { value: 'fast_warm', label: 'Fast Warm (~3–5h between sessions)' }
+        ]},
+        { name: 'target_days', label: 'Target Days', type: 'select', options: [
+          { value: '1', label: '1 day (short-term)' },
+          { value: '5', label: '5 days' },
+          { value: '10', label: '10 days (default longevity)' }
+        ]}
       ],
       onConfirm: async (vals) => {
         const res = await fetch(API + '/warming/enter', {
           method: 'POST', headers: authHeaders(),
-          body: JSON.stringify({ ws_account_id: accountId, mode: vals.mode, target_days: parseInt(vals.target_days) || 10 })
+          body: JSON.stringify({ ws_account_id: accountId, mode: vals.mode, target_days: parseInt(vals.target_days) || 1 })
         });
-        if (res.ok) showToast('Entered warming pool', 'success');
+        if (res.ok) showToast('Entered warming pool (calendar sessions)', 'success');
         else {
           const j = await res.json();
           showToast('Failed: ' + (j.error || 'unknown'), 'error');

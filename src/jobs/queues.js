@@ -23,19 +23,50 @@ export const exportQueue = new Queue('export', { connection });
 
 export const allQueues = [warmingQueue, blastQueue, groupPullQueue, exportQueue];
 
-// Simple helper to schedule a warming execution job (repeatable or delayed)
-// Use a generous lockDuration so long-running simulation steps don't cause "stalled" errors.
+/**
+ * Schedule a warming session (or day-finalize) job.
+ * Unique job id per enqueue so repeated reschedules always work; reconciler
+ * dedupes by scanning waiting/delayed jobs for the same taskId.
+ */
 export async function scheduleWarmingTask(taskId, delayMs = 0) {
   return warmingQueue.add(
     'execute-warm-step',
     { taskId },
     {
-      delay: delayMs,
+      delay: Math.max(0, delayMs || 0),
       removeOnComplete: 100,
       removeOnFail: 50,
       lockDuration: 120000, // 2 minutes - prevents premature stall during slow steps
+      jobId: `warm-${taskId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     }
   );
+}
+
+/** True if task already has a waiting/delayed/active job in the warming queue. */
+export async function hasPendingWarmingJob(taskId) {
+  const states = ['waiting', 'delayed', 'active', 'prioritized', 'paused'];
+  const jobs = await warmingQueue.getJobs(states, 0, 500);
+  return jobs.some((j) => j?.data?.taskId === taskId);
+}
+
+/**
+ * Re-queue executing/pending warming tasks that lost their delayed job (process restart).
+ */
+export async function reconcileWarmingJobs(listActiveTasksFn) {
+  const tasks = typeof listActiveTasksFn === 'function'
+    ? await listActiveTasksFn()
+    : [];
+  let scheduled = 0;
+  for (const task of tasks) {
+    if (!task?.id) continue;
+    const has = await hasPendingWarmingJob(task.id);
+    if (!has) {
+      await scheduleWarmingTask(task.id, 3000);
+      scheduled += 1;
+      logger.info('Warming reconciler: re-scheduled task', { taskId: task.id });
+    }
+  }
+  return { checked: tasks.length, scheduled };
 }
 
 export async function scheduleBlastJob(campaignId, delayMs = 0) {

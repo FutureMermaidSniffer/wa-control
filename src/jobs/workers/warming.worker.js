@@ -1,48 +1,49 @@
 /**
- * Warming worker — peer-warming engine.
+ * Warming worker — calendar-day sessions + peer contact-save longevity.
  *
- * Key principle: numbers warm EACH OTHER.
- * - Accounts in the warming pool send real messages to other pool members (peers).
- * - Uses day-range tiers: light (1-3), medium (4-7), active (8+).
- * - Audio warmth: sends voice note placeholders (file from materials if available).
- * - Warm group: all pool members share a WA group and message it.
- * - Safety monitor: health_score gating + daily cap + global ban detection.
+ * Each job runs ONE session (or a day-finalize wait), not a whole "day".
+ * - Real inter-session delays (hours), scaled by WARMING_TIME_SCALE for tests.
+ * - First peer interaction: mutual contact save + intro messages.
+ * - progress_days advances only when the calendar warm-day is complete.
  */
 import { Worker } from 'bullmq';
-import { getConnection } from '../queues.js';
+import { getConnection, scheduleWarmingTask } from '../queues.js';
 import db from '../../db/connection.js';
 import { getSessionEngine } from '../../core/engine/SessionEngine.js';
 import { logger } from '../../utils/logger.js';
 import warmingData from '../../data/warming.data.js';
+import {
+  advanceAfterSession,
+  shouldFinalizeDayOnly,
+  finalizeDay,
+  tierForDay,
+  peerMessageCount,
+  sessionsPerDayForProgress,
+  daySpanMs,
+  scaleMs,
+  getTimeScale,
+  pickMode,
+} from '../../core/warming/schedule.js';
+import createPeerHandshake from '../../core/warming/peerHandshake.js';
+import createBehaviors from '../../core/warming/behaviors.js';
 
-// Shared engine instance (set at boot in index.js)
-const sessionManager = {
-  connectAccount: (...a) => getSessionEngine().connectAccount(...a),
-  getOrCreateSocket: (...a) => getSessionEngine().getOrCreateSocket(...a),
-  updateProfile: (...a) => getSessionEngine().updateProfile(...a),
-  sendText: (...a) => getSessionEngine().sendText(...a),
-};
-
-// Utility: random int in [min, max]
-const rand = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
-// Async sleep
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-// --- Warm peer messages pool ---
-const PEER_TEXTS = [
-  'Hey! 👋', 'How are you doing?', 'Good morning! ☀️', 'Just checking in 😊',
-  '🙌', 'Hey, what\'s up?', 'Hi there!', 'Hope you\'re having a good day!',
-  'Hey! 🙂', 'Checking in!', '👍', '😄', 'Hope all is well!', 'Hello!',
-];
-
-// --- Warm group messages pool ---
-const GROUP_TEXTS = [
-  'Good morning everyone! 🌅', 'Have a great day! 💪', 'Hey team! 👋',
-  '🌟', 'Hope everyone is doing well!', 'Rise and shine! ☀️',
-  'Happy to be here 😊', 'Hello all!', '🙌🙌', 'Have a productive day!',
-];
+function buildSession() {
+  const engine = getSessionEngine();
+  return {
+    connectAccount: (...a) => engine.connectAccount(...a),
+    getOrCreateSocket: (...a) => engine.getOrCreateSocket(...a),
+    updateProfile: (...a) => engine.updateProfile(...a),
+    sendText: (...a) => engine.sendText(...a),
+    saveContact: (...a) => engine.saveContact(...a),
+    isSocketLive: (id) => engine.isSocketLive?.(id) ?? false,
+  };
+}
 
 export function startWarmingWorker() {
+  const session = buildSession();
+  const handshake = createPeerHandshake({ session });
+  const behaviors = createBehaviors(session);
+
   const worker = new Worker(
     'warming',
     async (job) => {
@@ -57,305 +58,273 @@ export function startWarmingWorker() {
         return { skipped: true };
       }
 
-      // === Safety pre-check ===
       const acc = await db('ws_accounts').where({ id: task.ws_account_id }).first();
       if (!acc) throw new Error(`ws_account ${task.ws_account_id} not found`);
 
-      // Health gate: if health_score is too low, pause this account
+      // Safety: health gate
       if ((acc.health_score || 100) < 30) {
-        logger.warn('Warming paused: health_score too low', { taskId, phone: acc.phone, score: acc.health_score });
+        logger.warn('Warming paused: health_score too low', {
+          taskId, phone: acc.phone, score: acc.health_score,
+        });
         await warmingData.updateTask(taskId, { status: 'paused' });
         return { skipped: true, reason: 'health_score_too_low' };
       }
 
-      // Global ban signal: if > 5 accounts errored in last hour, pause all
+      // Global ban signal
       const recentErrors = await db('ws_accounts')
         .where('status', 'error')
         .where('updated_at', '>', db.raw("NOW() - INTERVAL '1 hour'"))
         .count('id as n')
         .first();
-      if (parseInt(recentErrors?.n || 0) > 5) {
-        logger.error('GLOBAL BAN SIGNAL: many accounts errored in last hour — pausing warming', { taskId });
+      if (parseInt(recentErrors?.n || 0, 10) > 5) {
+        logger.error('GLOBAL BAN SIGNAL — pausing warming', { taskId });
         await warmingData.updateTask(taskId, { status: 'paused' });
         return { skipped: true, reason: 'global_ban_signal' };
       }
 
-      // Ensure account session
+      const day = task.progress_days || 0;
+      const sessionIndex = task.sessions_completed_today || 0;
+      const isFast = task.mode === 'fast_warm';
+      const isShortWarm = (task.target_days || 10) <= 2;
+      const tier = tierForDay(day);
+      const perDay = sessionsPerDayForProgress({
+        mode: task.mode,
+        targetDays: task.target_days,
+        progressDays: day,
+        override: task.sessions_per_day,
+      });
+
+      // Sessions for this warm-day already done — finalize or wait for day span (no extra work)
+      if (sessionIndex >= perDay) {
+        if (shouldFinalizeDayOnly(task)) {
+          const fin = finalizeDay(task);
+          await applyProgressAndMaybeReschedule(taskId, task, acc, fin, job);
+          return {
+            finalizeOnly: true,
+            progress: fin.progress_days,
+            done: fin.isDone,
+          };
+        }
+        const started = task.current_day_started_at
+          ? new Date(task.current_day_started_at).getTime()
+          : Date.now();
+        const span = scaleMs(daySpanMs(pickMode(task.mode)), getTimeScale());
+        const waitMs = Math.max(5_000, span - (Date.now() - started));
+        await scheduleWarmingTask(taskId, waitMs);
+        logger.info('Warming waiting for day span before advance', {
+          taskId, phone: acc.phone, waitMs, perDay, sessionIndex,
+        });
+        return { waitingForDaySpan: true, waitMs };
+      }
+
       try {
-        await sessionManager.connectAccount(task.ws_account_id);
+        await session.connectAccount(task.ws_account_id);
       } catch (e) {
         logger.warn('Failed to ensure session for warm', { taskId, error: e.message });
       }
 
       await job.updateProgress(10);
 
-      const sock = await sessionManager.getOrCreateSocket(task.ws_account_id).catch(() => null);
-      const isFast = task.mode === 'fast_warm';
-      const day = task.progress_days || 0;
+      logger.info('Warming session', {
+        taskId,
+        phone: acc.phone,
+        day,
+        sessionIndex: sessionIndex + 1,
+        perDay,
+        tier,
+        mode: task.mode,
+      });
 
-      // Day-range tier
-      const tier = day < 3 ? 'light' : (day < 7 ? 'medium' : 'active');
-      logger.info('Warming tier', { taskId, phone: acc.phone, day, tier, isFast });
+      // Mark day start / executing
+      const dayStartedAt = task.current_day_started_at
+        ? new Date(task.current_day_started_at)
+        : new Date();
+      await warmingData.updateTask(taskId, {
+        status: 'executing',
+        current_day_started_at: dayStartedAt,
+      });
 
-      // === TIER 1 — LIGHT (day 0-2): profile + presence + self-ping ===
-      // Profile: apply once (check if already done today via a simple time guard)
-      const lastProfileUpdate = acc.updated_at ? new Date(acc.updated_at) : new Date(0);
-      const hoursSinceProfile = (Date.now() - lastProfileUpdate.getTime()) / 3_600_000;
-
-      if (hoursSinceProfile > 47 || day === 0) {
-        // Nickname from materials
-        try {
-          const nicks = await db('materials').where({ type: 'nickname' }).select('content');
-          if (nicks.length && sock) {
-            const nick = nicks[rand(0, nicks.length - 1)].content;
-            await sessionManager.updateProfile(task.ws_account_id, { name: nick }).catch(() => {});
-            logger.info('Warming: applied nickname', { taskId, nick: nick.slice(0, 12) });
-            await sleep(rand(1500, 3000));
-          }
-        } catch (e) { /* ignore */ }
-
-        // Avatar from materials
-        try {
-          const avatars = await db('materials').where({ type: 'avatar' }).select('content');
-          if (avatars.length && sock) {
-            const avatarContent = avatars[rand(0, avatars.length - 1)].content;
-            if (avatarContent && !avatarContent.startsWith('http')) {
-              const avatarPath = avatarContent.startsWith('/') || avatarContent.startsWith('./')
-                ? avatarContent : `./uploads/${avatarContent}`;
-              await sessionManager.updateProfile(task.ws_account_id, { avatarBufferOrPath: avatarPath }).catch(() => {});
-              logger.info('Warming: applied avatar', { taskId });
-              await sleep(rand(2000, 4000));
-            }
-          }
-        } catch (e) { /* ignore */ }
+      // Complete any pending reciprocal saves/replies where we are the "to" side
+      try {
+        await handshake.completePendingReciprocals(acc, { max: 3 });
+      } catch (e) {
+        logger.debug('Reciprocal batch skipped', { taskId, error: e.message });
       }
 
-      // Presence ping (available → composing → unavailable)
-      if (sock) {
-        await sock.sendPresenceUpdate('available').catch(() => {});
-        await sleep(rand(3000, 8000));
-        await sock.sendPresenceUpdate('unavailable').catch(() => {});
-        logger.info('Warming: presence update', { taskId });
+      await job.updateProgress(20);
+
+      // Bootstrap session (session 0): profile
+      if (sessionIndex === 0 || day === 0) {
+        await behaviors.maybeApplyProfile(task.ws_account_id, acc, {
+          force: sessionIndex === 0 && day === 0,
+        });
       }
 
-      // === PEER MESSAGING (all tiers when peers exist) ===
-      // Previously only medium/active + self-ping on light → looked like "only messages self"
-      let peerSent = 0;
-      if (sock) {
-        try {
-          // Peers: other accounts in warming with a live-capable status
-          let peers = await db('warming_tasks')
-            .join('ws_accounts', 'warming_tasks.ws_account_id', 'ws_accounts.id')
-            .whereIn('warming_tasks.status', ['executing', 'pending', 'paused'])
-            .whereIn('ws_accounts.status', ['linked', 'active', 'linking', 'offline'])
-            .whereNot('warming_tasks.ws_account_id', task.ws_account_id)
-            .whereNotNull('ws_accounts.phone')
-            .select('ws_accounts.id', 'ws_accounts.phone')
-            .limit(10);
-
-          // Fallback: any other linked/active account (even not in warming) so pool of 1 still has targets
-          if (!peers.length) {
-            peers = await db('ws_accounts')
-              .whereIn('status', ['linked', 'active'])
-              .whereNot('id', task.ws_account_id)
-              .whereNotNull('phone')
-              .select('id', 'phone')
-              .limit(5);
-            if (peers.length) {
-              logger.info('Warming: no other warming peers — using other linked accounts', {
-                taskId, count: peers.length,
-              });
-            }
-          }
-
-          if (peers.length) {
-            const count = tier === 'light' ? 1 : (isFast ? 2 : 1);
-            const shuffled = peers.sort(() => Math.random() - 0.5).slice(0, count);
-            for (const peer of shuffled) {
-              const digits = String(peer.phone || '').replace(/\D/g, '');
-              if (digits.length < 8) continue;
-              const peerJid = `${digits}@s.whatsapp.net`;
-              // Human-like: composing presence toward peer
-              await sock.sendPresenceUpdate('composing', peerJid).catch(() => {});
-              await sleep(rand(800, 2500));
-              await sock.sendPresenceUpdate('paused', peerJid).catch(() => {});
-              const msg = PEER_TEXTS[rand(0, PEER_TEXTS.length - 1)];
-              await sessionManager.sendText(task.ws_account_id, peerJid, msg, { delayMs: rand(500, 2000) });
-              peerSent += 1;
-              logger.info('Warming: peer message sent', { taskId, from: acc.phone, to: peer.phone, msg });
-              await sleep(rand(4000, 12000));
-            }
-          } else {
-            logger.warn('Warming: no peers available — add more linked numbers to the warming pool', { taskId, phone: acc.phone });
-          }
-        } catch (e) {
-          logger.warn('Warming: peer messaging failed (non-critical)', { taskId, error: e.message });
-        }
-      }
-
-      // Self-message only as last resort (status/saved) when no peers — not the primary warm action
-      if (sock && sock.user?.id && peerSent === 0 && tier === 'light') {
-        try {
-          const selfJid = `${sock.user.id.split(':')[0]}@s.whatsapp.net`;
-          await sessionManager.sendText(task.ws_account_id, selfJid,
-            `Warm check ${new Date().toISOString().slice(11, 16)}`, { delayMs: rand(500, 1500) });
-          logger.info('Warming: self-message (no peers) sent', { taskId });
-        } catch (e) { /* may fail if not fully online */ }
-      }
-
+      await behaviors.runPresenceCycle(task.ws_account_id);
       await job.updateProgress(35);
 
-      // === TIER 2 — MEDIUM (day 3-6): warm group only (peers already handled above) ===
-      if ((tier === 'medium' || tier === 'active') && sock) {
+      // Peer messaging with first-contact handshake
+      const msgCount = peerMessageCount({
+        tier,
+        mode: task.mode,
+        sessionIndex,
+        isShortWarm,
+      });
 
-        // --- WARM GROUP: send to shared warm group if assigned ---
-        try {
-          if (acc.warm_group_id || acc.current_warming_task_id) {
-            // Check if there's a warm_groups entry matching
-            const warmGroup = await db('warm_groups')
-              .where('id', acc.warm_group_id || '')
-              .orWhereRaw("member_account_ids @> ?", [JSON.stringify([task.ws_account_id])])
-              .first();
+      let peerActions = 0;
+      const dailyCap = isFast ? 12 : 8;
+      const alreadySent = acc.daily_sent || 0;
+      const remaining = Math.max(0, dailyCap - alreadySent);
+      const effectiveCount = Math.min(msgCount, remaining);
 
-            if (warmGroup?.group_jid) {
-              const groupMsg = GROUP_TEXTS[rand(0, GROUP_TEXTS.length - 1)];
-              await sessionManager.sendText(task.ws_account_id, warmGroup.group_jid, groupMsg, { delayMs: rand(1000, 3000) });
-              logger.info('Warming: warm group message sent', { taskId, groupJid: warmGroup.group_jid });
-            }
+      if (effectiveCount <= 0) {
+        logger.warn('Warming: daily peer cap reached', { taskId, phone: acc.phone, dailyCap });
+      } else {
+        const peers = await warmingData.pickWarmingPeers(task.ws_account_id, {
+          count: effectiveCount,
+          preferUnintroduced: true,
+        });
+
+        if (!peers.length) {
+          logger.warn('Warming: no peers — self-ping fallback', { taskId, phone: acc.phone });
+          if (tier === 'light' || isShortWarm) {
+            await behaviors.selfPing(task.ws_account_id);
           }
-        } catch (e) {
-          // warm_groups table might not exist yet — non-fatal
-          logger.debug('Warming: warm group send skipped', { taskId, error: e.message });
+        } else {
+          for (const peer of peers.slice(0, effectiveCount)) {
+            const introduced = await warmingData.isPeerIntroduced(acc.id, peer.id);
+            if (!introduced) {
+              const result = await handshake.ensurePeerHandshake(acc, peer);
+              if (result.ok || result.skipped) peerActions += 1;
+            } else {
+              const fu = await handshake.sendPeerFollowUp(acc, peer);
+              if (fu.ok) peerActions += 1;
+            }
+
+            await db('ws_accounts')
+              .where({ id: task.ws_account_id })
+              .update({ daily_sent: db.raw('COALESCE(daily_sent, 0) + 1') })
+              .catch(() => {});
+          }
         }
       }
 
       await job.updateProgress(60);
 
-      // === TIER 3 — ACTIVE (day 7+): replies + audio note + more group activity ===
-      if (tier === 'active' && sock) {
+      // Medium+: warm group
+      if (tier === 'medium' || tier === 'active' || (isShortWarm && sessionIndex >= perDay - 1)) {
+        await behaviors.maybeWarmGroup(task.ws_account_id, acc, {
+          extra: tier === 'active' && isFast,
+        });
+      }
 
-        // Simulate composing presence before next message (human-like)
-        if (sock.user?.id) {
-          try {
-            const selfJid = `${sock.user.id.split(':')[0]}@s.whatsapp.net`;
-            await sock.sendPresenceUpdate('composing', selfJid).catch(() => {});
-            await sleep(rand(1500, 4000));
-            await sock.sendPresenceUpdate('paused', selfJid).catch(() => {});
-          } catch (e) { /* ignore */ }
-        }
-
-        // Audio note: look for audio material in materials library
-        // Materials can have type='audio' pointing to an .ogg/.opus file in /uploads
-        try {
-          const audioMats = await db('materials').where({ type: 'audio' }).select('content').limit(5);
-          if (audioMats.length && sock && sock.user?.id) {
-            const audioMat = audioMats[rand(0, audioMats.length - 1)];
-            const audioPath = audioMat.content.startsWith('/')
-              ? audioMat.content : `./uploads/${audioMat.content}`;
-
-            const { default: fs } = await import('fs/promises');
-            const audioBuf = await fs.readFile(audioPath).catch(() => null);
-            if (audioBuf) {
-              const peers = await db('warming_tasks')
-                .join('ws_accounts', 'warming_tasks.ws_account_id', 'ws_accounts.id')
-                .whereIn('warming_tasks.status', ['executing', 'pending'])
-                .whereNot('warming_tasks.ws_account_id', task.ws_account_id)
-                .select('ws_accounts.id', 'ws_accounts.phone')
-                .limit(3);
-
-              if (peers.length) {
-                const peer = peers[rand(0, peers.length - 1)];
-                const digits = String(peer.phone || '').replace(/\D/g, '');
-                const peerJid = `${digits}@s.whatsapp.net`;
-                await sock.sendMessage(peerJid, {
-                  audio: audioBuf,
-                  mimetype: 'audio/ogg; codecs=opus',
-                  ptt: true, // voice note (push-to-talk)
-                });
-                logger.info('Warming: audio note sent to peer', { taskId, to: peer.phone });
-              }
-            }
-          }
-        } catch (e) {
-          logger.debug('Warming: audio note skipped', { taskId, error: e.message });
-        }
-
-        // Extra group activity on fast warm
-        if (isFast) {
-          try {
-            const warmGroup = await db('warm_groups')
-              .whereRaw("member_account_ids @> ?", [JSON.stringify([task.ws_account_id])])
-              .first().catch(() => null);
-            if (warmGroup?.group_jid) {
-              const msg2 = GROUP_TEXTS[rand(0, GROUP_TEXTS.length - 1)];
-              await sessionManager.sendText(task.ws_account_id, warmGroup.group_jid, msg2, { delayMs: rand(5000, 15000) });
-            }
-          } catch (e) { /* ignore */ }
+      // Active: audio note to an introduced peer
+      if (tier === 'active' && peerActions > 0) {
+        const peers = await warmingData.pickWarmingPeers(task.ws_account_id, {
+          count: 1,
+          preferUnintroduced: false,
+        });
+        if (peers[0]) {
+          await behaviors.maybeSendAudioNote(task.ws_account_id, peers[0]);
         }
       }
 
       await job.updateProgress(80);
 
-      // === Progress advance ===
-      const newProgress = Math.min((task.progress_days || 0) + 1, task.target_days || 10);
-      const isDone = newProgress >= (task.target_days || 10);
-
-      await warmingData.updateTask(taskId, {
-        progress_days: newProgress,
-        status: isDone ? 'completed' : 'executing',
-        ...(isDone && { completed_at: db.fn.now() }),
+      // Advance session / day (use day start from beginning of this session)
+      const advanced = advanceAfterSession({
+        ...task,
+        current_day_started_at: dayStartedAt,
       });
-
-      // Update health score (increment slightly on successful run)
-      const currentScore = acc.health_score || 100;
-      await db('ws_accounts').where({ id: task.ws_account_id }).update({
-        health_score: Math.min(100, currentScore + 2),
-      });
-
-      if (isDone) {
-        // Graduation: apply a fresh nickname/avatar and move to active
-        try {
-          const gradNicks = await db('materials').where({ type: 'nickname' }).select('content');
-          if (gradNicks.length) {
-            const nick = gradNicks[rand(0, gradNicks.length - 1)].content;
-            await sessionManager.updateProfile(task.ws_account_id, { name: nick }).catch(() => {});
-          }
-        } catch (e) { /* ignore */ }
-
-        await db('ws_accounts')
-          .where({ id: task.ws_account_id })
-          .update({ status: 'active', current_warming_task_id: null, is_in_warehouse: false });
-
-        logger.info('Warming COMPLETED — account graduated to active', { taskId, phone: acc.phone });
-      } else {
-        // Re-schedule next cycle with human-like delay
-        // Normal: 2h (demo: 2 min). Fast warm: 45 min (demo: 45 s).
-        const delay = isFast ? 45_000 : 120_000;
-        const { scheduleWarmingTask } = await import('../queues.js');
-        await scheduleWarmingTask(taskId, delay);
-      }
+      await applyProgressAndMaybeReschedule(taskId, task, acc, advanced, job);
 
       await job.updateProgress(100);
-      return { progress: newProgress, done: isDone, tier };
+      return {
+        progress: advanced.progress_days,
+        sessionsToday: advanced.sessions_completed_today,
+        dayCompleted: advanced.dayCompleted,
+        done: advanced.isDone,
+        tier,
+        peerActions,
+      };
     },
     {
       connection: getConnection(),
       concurrency: 2,
       stalledInterval: 45000,
       maxStalledCount: 3,
-    }
+    },
   );
 
   worker.on('failed', (job, err) => {
-    logger.error('Warming job failed', { jobId: job?.id, taskId: job?.data?.taskId, err: err.message });
+    logger.error('Warming job failed', {
+      jobId: job?.id,
+      taskId: job?.data?.taskId,
+      err: err.message,
+    });
   });
 
   worker.on('completed', (job) => {
     logger.debug('Warming job completed', { jobId: job.id });
   });
 
-  logger.info('Warming worker started (peer-warming mode)');
+  logger.info('Warming worker started (calendar sessions + peer handshake)');
   return worker;
+}
+
+async function applyProgressAndMaybeReschedule(taskId, task, acc, advanced, job) {
+  const session = buildSession();
+
+  await warmingData.updateTask(taskId, {
+    sessions_completed_today: advanced.sessions_completed_today,
+    progress_days: advanced.progress_days,
+    current_day_started_at: advanced.current_day_started_at,
+    last_session_at: advanced.last_session_at,
+    status: advanced.isDone ? 'completed' : 'executing',
+    ...(advanced.isDone && { completed_at: db.fn.now() }),
+  });
+
+  // Health bump on successful session
+  const currentScore = acc.health_score || 100;
+  await db('ws_accounts').where({ id: task.ws_account_id }).update({
+    health_score: Math.min(100, currentScore + 1),
+  });
+
+  if (advanced.isDone) {
+    try {
+      const gradNicks = await db('materials').where({ type: 'nickname' }).select('content');
+      if (gradNicks.length) {
+        const nick = gradNicks[Math.floor(Math.random() * gradNicks.length)].content;
+        await session.updateProfile(task.ws_account_id, { name: nick }).catch(() => {});
+      }
+    } catch { /* ignore */ }
+
+    await db('ws_accounts')
+      .where({ id: task.ws_account_id })
+      .update({
+        status: 'active',
+        current_warming_task_id: null,
+        is_in_warehouse: false,
+      });
+
+    logger.info('Warming COMPLETED — graduated to active', {
+      taskId,
+      phone: acc.phone,
+      days: advanced.progress_days,
+    });
+  } else {
+    await scheduleWarmingTask(taskId, advanced.nextDelayMs);
+    logger.info('Warming next session scheduled', {
+      taskId,
+      phone: acc.phone,
+      delayMs: advanced.nextDelayMs,
+      progressDays: advanced.progress_days,
+      sessionsToday: advanced.sessions_completed_today,
+      dayCompleted: advanced.dayCompleted,
+    });
+  }
+
+  if (job) await job.updateProgress(90);
 }
 
 export default startWarmingWorker;
