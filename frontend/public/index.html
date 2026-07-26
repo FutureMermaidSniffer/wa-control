@@ -756,27 +756,68 @@
 
     <!-- ===== MATERIALS (warming / blasts / groups content pool) ===== -->
     <div id="tab-materials" class="tab card" style="display:none">
-      <h3 style="margin-top:0">🎨 Materials (warming &amp; campaigns)</h3>
-      <div style="font-size:12px;color:#555;background:#f0f9ff;border:1px solid #bae6fd;padding:10px 12px;border-radius:6px;margin-bottom:10px;line-height:1.45">
-        Content library for <strong>warming</strong>, <strong>blasts</strong>, and <strong>group tools</strong>.
-        <br><strong>This does not change a number’s live WhatsApp profile.</strong>
-        To set display name / profile photo for a linked account, open <strong>💬 Chat Desk</strong> → select the account → <strong>Edit profile</strong>.
+      <div class="row" style="justify-content:space-between;margin-bottom:8px">
+        <h3 style="margin:0">🎨 Materials &amp; Profile Pools</h3>
+        <button onclick="loadMaterialsTab()" class="primary">↻ Refresh</button>
       </div>
+      <div style="font-size:12px;color:#555;background:#f0f9ff;border:1px solid #bae6fd;padding:10px 12px;border-radius:6px;margin-bottom:14px;line-height:1.5">
+        <strong>Profile pools</strong> supply nicknames, avatars, and About text that <strong>warming</strong> applies to numbers.
+        Build the <strong>library</strong> below, attach items to a pool, and mark one pool <strong>Default</strong> for warming.
+        <br>Live profile for a single linked account: <strong>💬 Chat Desk</strong> → Edit profile.
+      </div>
+
+      <!-- Profile pools -->
+      <div class="section-title">👤 Profile pools (warming source)</div>
       <div class="row" style="margin-bottom:10px">
+        <button class="accent" onclick="createProfilePool()">+ New pool</button>
+      </div>
+      <div id="profile-pools-list" class="row" style="flex-wrap:wrap;gap:10px;margin-bottom:14px"></div>
+
+      <div id="pool-detail" style="display:none;border:1px solid #e5e7eb;border-radius:8px;padding:12px;margin-bottom:16px;background:#fafafa">
+        <div class="row" style="justify-content:space-between;margin-bottom:8px">
+          <div>
+            <strong id="pool-detail-title">Pool</strong>
+            <span id="pool-detail-meta" style="font-size:12px;color:#666;margin-left:8px"></span>
+          </div>
+          <div class="row">
+            <button onclick="editOpenPool()" style="font-size:12px">Edit pool</button>
+            <button class="success" onclick="setDefaultOpenPool()" style="font-size:12px">★ Set default</button>
+            <button onclick="closePoolDetail()" style="font-size:12px">Close</button>
+          </div>
+        </div>
+        <p id="pool-detail-desc" style="font-size:12px;color:#666;margin:0 0 10px"></p>
+        <div class="row" style="margin-bottom:8px">
+          <button class="accent" onclick="addMaterialsToOpenPool()" style="font-size:12px">+ Add from library</button>
+          <span style="font-size:11px;color:#888">Removing from pool does not delete the library item.</span>
+        </div>
+        <div id="pool-detail-items" style="font-size:13px"></div>
+      </div>
+
+      <!-- Material library -->
+      <div class="section-title">📚 Material library</div>
+      <div class="row" style="margin-bottom:10px;flex-wrap:wrap">
         <select id="mat-type">
-          <option value="nickname">nickname (warming)</option>
+          <option value="nickname">nickname (display name)</option>
+          <option value="avatar">avatar (profile photo)</option>
+          <option value="about">about (WA status bio)</option>
           <option value="message">message template</option>
           <option value="audio">audio / voice note</option>
-          <option value="avatar">warming avatar pool</option>
         </select>
-        <input id="mat-name" placeholder="name" style="width:120px" />
-        <input id="mat-content" placeholder="text content (nick / message)" style="flex:1" />
+        <input id="mat-name" placeholder="name / label" style="width:120px" />
+        <input id="mat-content" placeholder="text content (nick / about / message)" style="flex:1;min-width:140px" />
         <input id="mat-file" type="file" accept="image/*,audio/*" style="max-width:180px" />
-        <button class="accent" onclick="addMaterial()">Add</button>
-        <button onclick="loadMaterials()">↻ Refresh</button>
+        <button class="accent" onclick="addMaterial()">Add to library</button>
+        <select id="mat-filter-type" onchange="loadMaterials()" style="margin-left:auto">
+          <option value="">All types</option>
+          <option value="nickname">nickname</option>
+          <option value="avatar">avatar</option>
+          <option value="about">about</option>
+          <option value="message">message</option>
+          <option value="audio">audio</option>
+        </select>
       </div>
       <table id="materials-table">
-        <thead><tr><th>Type</th><th>Name</th><th>Content / Preview</th><th></th></tr></thead>
+        <thead><tr><th>Type</th><th>Name</th><th>Content / Preview</th><th>Usage</th><th>Active</th><th></th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
@@ -985,8 +1026,11 @@
           const sel = (inp.value != null && String(inp.value) === String(o.value)) ? ' selected' : '';
           return `<option value="${o.value}"${sel}>${o.label}</option>`;
         }).join('') + `</select>`;
+      } else if (inp.type === 'file') {
+        body += `<input id="mi-${i}" type="file" accept="${inp.accept || '*/*'}" style="font-size:12px" />`;
       } else {
-        body += `<input id="mi-${i}" type="${inp.type||'text'}" value="${inp.value||''}" placeholder="${inp.placeholder||''}" />`;
+        const safeVal = String(inp.value ?? '').replace(/"/g, '&quot;');
+        body += `<input id="mi-${i}" type="${inp.type || 'text'}" value="${safeVal}" placeholder="${inp.placeholder || ''}" />`;
       }
       body += `</div>`;
     });
@@ -995,12 +1039,22 @@
       footer = `<button onclick="hideModal()">Cancel</button><button class="primary" onclick="_runConfirm()">OK</button>`;
       _confirmFn = () => {
         const vals = {};
+        const files = {};
         inputs.forEach((inp, i) => {
           const el = document.getElementById(`mi-${i}`);
-          vals[inp.name || `f${i}`] = el ? el.value : '';
+          if (!el) {
+            vals[inp.name || `f${i}`] = '';
+            return;
+          }
+          if (inp.type === 'file') {
+            files[inp.name || `f${i}`] = el.files?.[0] || null;
+            vals[inp.name || `f${i}`] = el.files?.[0]?.name || '';
+          } else {
+            vals[inp.name || `f${i}`] = el.value;
+          }
         });
         hideModal();
-        onConfirm(vals);
+        onConfirm(vals, files);
       };
       window._runConfirm = _confirmFn;
     } else {
@@ -1041,7 +1095,7 @@
     if (tab === 'acquire') { loadAcquiredNumbers(); loadGrizzlyBalance(); startAcquireAutoPoll(); }
     if (tab === 'contacts') loadContacts();
     if (tab === 'proxies') loadProxies();
-    if (tab === 'materials') loadMaterials();
+    if (tab === 'materials') loadMaterialsTab();
     if (tab === 'ports') loadPorts();
     if (tab === 'live') loadSessions();
   }
@@ -1051,7 +1105,7 @@
     loadWarming();
     loadContacts();
     loadProxies();
-    loadMaterials();
+    loadMaterialsTab();
     loadSessions();
   }
 
@@ -2600,22 +2654,265 @@
     }
   }
 
-  /* ===================== MATERIALS ===================== */
-  async function loadMaterials() {
-    const res = await fetch(API + '/materials', { headers: authHeaders() });
+  /* ===================== MATERIALS + PROFILE POOLS ===================== */
+  let _openPoolId = null;
+  let _materialsCache = [];
+
+  async function loadMaterialsTab() {
+    await Promise.all([loadProfilePools(), loadMaterials()]);
+    if (_openPoolId) await openPoolDetail(_openPoolId);
+  }
+
+  function materialPreviewHtml(m) {
+    if (m.type === 'avatar' && m.content) {
+      const safe = String(m.content).replace(/"/g, '');
+      return `<img src="/uploads/${safe}" alt="" style="max-height:36px;max-width:36px;vertical-align:middle;border-radius:50%;object-fit:cover" onerror="this.style.display='none'" /> <small style="color:#888">${escapeHtml(safe)}</small>`;
+    }
+    if (m.type === 'audio') return `🎵 ${escapeHtml(m.content || '')}`;
+    const t = String(m.content || '');
+    return escapeHtml(t.length > 80 ? t.slice(0, 80) + '…' : t);
+  }
+
+  async function loadProfilePools() {
+    const res = await fetch(API + '/materials/pools', { headers: authHeaders() });
     const json = await res.json();
+    const el = document.getElementById('profile-pools-list');
+    if (!el) return;
+    const pools = json.data || [];
+    if (!pools.length) {
+      el.innerHTML = '<span style="color:#888;font-size:13px">No profile pools yet. Create one — warming will use the default pool for nick/avatar/About.</span>';
+      return;
+    }
+    el.innerHTML = pools.map(p => {
+      const c = p.counts || {};
+      const def = p.is_default ? '<span class="badge" style="background:#dcfce7;color:#166534">DEFAULT</span>' : '';
+      const active = p.is_active === false ? '<span class="badge" style="background:#fee2e2;color:#991b1b">inactive</span>' : '';
+      return `<div class="card" style="padding:10px 12px;min-width:200px;max-width:260px;cursor:pointer;border-color:${p.is_default ? '#86efac' : '#e5e7eb'}" onclick="openPoolDetail('${p.id}')">
+        <div style="font-weight:600;margin-bottom:4px">${escapeHtml(p.name)} ${def} ${active}</div>
+        <div style="font-size:11px;color:#666;line-height:1.4">
+          ${p.item_count || 0} items · nick ${c.nickname || 0} · av ${c.avatar || 0} · about ${c.about || 0}
+        </div>
+        <div style="margin-top:8px;display:flex;gap:4px" onclick="event.stopPropagation()">
+          <button style="font-size:11px;flex:1" onclick="openPoolDetail('${p.id}')">Open</button>
+          ${!p.is_default ? `<button class="success" style="font-size:11px" onclick="setDefaultPool('${p.id}')">★ Default</button>` : ''}
+          <button class="danger" style="font-size:11px" onclick="deleteProfilePool('${p.id}','${escapeHtml(p.name)}')">✕</button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  async function openPoolDetail(id) {
+    _openPoolId = id;
+    const res = await fetch(API + '/materials/pools/' + id, { headers: authHeaders() });
+    const json = await res.json();
+    const p = json.data;
+    if (!p) { showToast('Pool not found', 'error'); return; }
+    const panel = document.getElementById('pool-detail');
+    panel.style.display = 'block';
+    document.getElementById('pool-detail-title').textContent = p.name;
+    document.getElementById('pool-detail-meta').innerHTML =
+      (p.is_default ? '<span class="badge" style="background:#dcfce7;color:#166534">DEFAULT</span> ' : '') +
+      (p.is_active === false ? '<span class="badge">inactive</span> ' : 'active · ') +
+      `${p.item_count || 0} items`;
+    document.getElementById('pool-detail-desc').textContent = p.description || 'No description. Warming uses nicknames, avatars, and About from this pool when it is default.';
+    const itemsEl = document.getElementById('pool-detail-items');
+    const mats = p.materials || [];
+    if (!mats.length) {
+      itemsEl.innerHTML = '<div style="color:#888;font-size:13px;padding:8px">Pool is empty. Add nicknames and avatars from the library so warming can apply profiles.</div>';
+      return;
+    }
+    itemsEl.innerHTML = `<table style="width:100%;font-size:12px"><thead><tr><th>Type</th><th>Name</th><th>Preview</th><th></th></tr></thead><tbody>` +
+      mats.map(m => `<tr>
+        <td><span class="badge" style="background:#f0f0f0">${escapeHtml(m.type)}</span></td>
+        <td>${escapeHtml(m.name || '')}</td>
+        <td>${materialPreviewHtml(m)}</td>
+        <td><button class="danger" style="font-size:11px" onclick="removeFromOpenPool('${m.id}')">Remove</button></td>
+      </tr>`).join('') + `</tbody></table>`;
+  }
+
+  function closePoolDetail() {
+    _openPoolId = null;
+    document.getElementById('pool-detail').style.display = 'none';
+  }
+
+  function createProfilePool() {
+    showNotification({
+      title: 'New profile pool',
+      message: 'Pools group nicknames, avatars, and About text for warming.',
+      type: 'info',
+      inputs: [
+        { name: 'name', label: 'Name', type: 'text', value: 'New Profile Pool' },
+        { name: 'description', label: 'Description', type: 'text', value: '' },
+        { name: 'is_default', label: 'Set as default for warming', type: 'select', options: [
+          { value: 'false', label: 'No' }, { value: 'true', label: 'Yes — warming uses this pool' }
+        ]}
+      ],
+      onConfirm: async (vals) => {
+        const res = await fetch(API + '/materials/pools', {
+          method: 'POST', headers: authHeaders(),
+          body: JSON.stringify({
+            name: vals.name || 'New Profile Pool',
+            description: vals.description || '',
+            is_default: vals.is_default === 'true',
+          }),
+        });
+        if (!res.ok) {
+          const j = await res.json().catch(() => ({}));
+          showToast(j.error || 'Failed to create pool', 'error');
+          return;
+        }
+        const j = await res.json();
+        showToast('Pool created', 'success');
+        await loadProfilePools();
+        if (j.data?.id) openPoolDetail(j.data.id);
+      },
+    });
+  }
+
+  function editOpenPool() {
+    if (!_openPoolId) return;
+    fetch(API + '/materials/pools/' + _openPoolId, { headers: authHeaders() })
+      .then(r => r.json())
+      .then(j => {
+        const p = j.data;
+        if (!p) return;
+        showNotification({
+          title: 'Edit pool',
+          message: escapeHtml(p.name),
+          type: 'info',
+          inputs: [
+            { name: 'name', label: 'Name', type: 'text', value: p.name || '' },
+            { name: 'description', label: 'Description', type: 'text', value: p.description || '' },
+            { name: 'is_active', label: 'Active', type: 'select', options: [
+              { value: 'true', label: 'Active' }, { value: 'false', label: 'Inactive' }
+            ]}
+          ],
+          onConfirm: async (vals) => {
+            await fetch(API + '/materials/pools/' + _openPoolId, {
+              method: 'PATCH', headers: authHeaders(),
+              body: JSON.stringify({
+                name: vals.name,
+                description: vals.description,
+                is_active: vals.is_active !== 'false',
+              }),
+            });
+            showToast('Pool updated', 'success');
+            loadProfilePools();
+            openPoolDetail(_openPoolId);
+          },
+        });
+      });
+  }
+
+  async function setDefaultOpenPool() {
+    if (!_openPoolId) return;
+    await setDefaultPool(_openPoolId);
+  }
+
+  async function setDefaultPool(id) {
+    const res = await fetch(API + '/materials/pools/' + id + '/set-default', {
+      method: 'POST', headers: authHeaders(),
+    });
+    if (res.ok) showToast('Default profile pool updated — warming will use it', 'success');
+    else showToast('Failed to set default', 'error');
+    loadProfilePools();
+    if (_openPoolId) openPoolDetail(_openPoolId);
+  }
+
+  function deleteProfilePool(id, name) {
+    showConfirm(`Delete profile pool <strong>${escapeHtml(name || '')}</strong>? Materials stay in the library.`, async () => {
+      const res = await fetch(API + '/materials/pools/' + id, { method: 'DELETE', headers: authHeaders() });
+      if (res.ok) {
+        showToast('Pool deleted', 'success');
+        if (_openPoolId === id) closePoolDetail();
+        loadProfilePools();
+      } else showToast('Delete failed', 'error');
+    }, true);
+  }
+
+  async function removeFromOpenPool(materialId) {
+    if (!_openPoolId) return;
+    await fetch(API + `/materials/pools/${_openPoolId}/items/${materialId}`, {
+      method: 'DELETE', headers: authHeaders(),
+    });
+    showToast('Removed from pool', 'info');
+    openPoolDetail(_openPoolId);
+    loadProfilePools();
+  }
+
+  function addMaterialsToOpenPool() {
+    if (!_openPoolId) return;
+    const inPool = new Set();
+    // load pool then pick from cache
+    fetch(API + '/materials/pools/' + _openPoolId, { headers: authHeaders() })
+      .then(r => r.json())
+      .then(async j => {
+        (j.data?.materials || []).forEach(m => inPool.add(m.id));
+        if (!_materialsCache.length) {
+          const res = await fetch(API + '/materials', { headers: authHeaders() });
+          const mj = await res.json();
+          _materialsCache = mj.data || [];
+        }
+        const available = _materialsCache.filter(m => !inPool.has(m.id) && m.is_active !== false);
+        if (!available.length) {
+          showToast('No more library items to add (or library empty)', 'info');
+          return;
+        }
+        // Multi-add: pick type filter then multi-select via sequential confirms is clunky —
+        // use notification with a select of up to 40 items (value = id)
+        const options = available.slice(0, 40).map(m => ({
+          value: m.id,
+          label: `${m.type}: ${m.name || m.content?.slice?.(0, 30) || m.id.slice(0, 8)}`,
+        }));
+        showNotification({
+          title: 'Add materials to pool',
+          message: 'Select one item to add (repeat to add more). Showing up to 40 from library.',
+          type: 'info',
+          inputs: [
+            { name: 'material_id', label: 'Material', type: 'select', options },
+          ],
+          onConfirm: async (vals) => {
+            if (!vals.material_id) return;
+            const res = await fetch(API + `/materials/pools/${_openPoolId}/items`, {
+              method: 'POST', headers: authHeaders(),
+              body: JSON.stringify({ material_ids: [vals.material_id] }),
+            });
+            if (res.ok) {
+              showToast('Added to pool', 'success');
+              openPoolDetail(_openPoolId);
+              loadProfilePools();
+            } else showToast('Add failed', 'error');
+          },
+        });
+      });
+  }
+
+  async function loadMaterials() {
+    const typeFilter = document.getElementById('mat-filter-type')?.value || '';
+    const q = typeFilter ? `?type=${encodeURIComponent(typeFilter)}` : '';
+    const res = await fetch(API + '/materials' + q, { headers: authHeaders() });
+    const json = await res.json();
+    _materialsCache = json.data || [];
     const tbody = document.querySelector('#materials-table tbody');
+    if (!tbody) return;
     tbody.innerHTML = '';
-    (json.data || []).forEach(m => {
-      let preview = m.content || '';
-      if (m.type === 'avatar' && m.content) {
-        const safe = String(m.content).replace(/"/g, '');
-        preview = `<img src="/uploads/${safe}" alt="" style="max-height:36px;max-width:36px;vertical-align:middle;border-radius:50%" onerror="this.style.display='none';this.nextElementSibling&&(this.nextElementSibling.textContent='(missing file) '+this.nextElementSibling.textContent)" /> <small style="color:#888">${safe}</small>`;
-      } else if (m.type === 'audio') {
-        preview = `🎵 ${m.content}`;
-      }
+    if (!_materialsCache.length) {
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#888">Library empty — add nicknames and avatars above.</td></tr>';
+      return;
+    }
+    _materialsCache.forEach(m => {
+      const active = m.is_active !== false;
       const tr = document.createElement('tr');
-      tr.innerHTML = `<td><span class="badge" style="background:#f0f0f0">${m.type}</span></td><td>${m.name}</td><td>${preview}</td><td><button class="danger" onclick="delMaterial('${m.id}')">✕</button></td>`;
+      tr.innerHTML = `
+        <td><span class="badge" style="background:#f0f0f0">${escapeHtml(m.type)}</span></td>
+        <td>${escapeHtml(m.name || '')}</td>
+        <td>${materialPreviewHtml(m)}</td>
+        <td style="font-size:12px;color:#666">${m.usage_count || 0}</td>
+        <td style="font-size:12px">${active ? '✓' : '—'}</td>
+        <td style="white-space:nowrap">
+          <button style="font-size:11px" onclick="editMaterial('${m.id}')">Edit</button>
+          <button class="danger" style="font-size:11px" onclick="delMaterial('${m.id}')">✕</button>
+        </td>`;
       tbody.appendChild(tr);
     });
   }
@@ -2624,26 +2921,99 @@
     const type = document.getElementById('mat-type').value;
     const fileInput = document.getElementById('mat-file');
     const hasFile = (type === 'avatar' || type === 'audio') && fileInput?.files.length > 0;
+    let res;
     if (hasFile) {
       const fd = new FormData();
       fd.append('type', type);
       fd.append('name', document.getElementById('mat-name').value || '');
       fd.append('file', fileInput.files[0]);
-      await fetch(API + '/materials', { method: 'POST', headers: { 'Authorization': 'Bearer ' + TOKEN }, body: fd });
+      res = await fetch(API + '/materials', { method: 'POST', headers: { 'Authorization': 'Bearer ' + TOKEN }, body: fd });
     } else {
-      const body = { type, name: document.getElementById('mat-name').value, content: document.getElementById('mat-content').value };
-      await fetch(API + '/materials', { method: 'POST', headers: authHeaders(), body: JSON.stringify(body) });
+      const body = {
+        type,
+        name: document.getElementById('mat-name').value,
+        content: document.getElementById('mat-content').value,
+      };
+      if (!body.content) {
+        showToast('Content required (or file for avatar/audio)', 'error');
+        return;
+      }
+      res = await fetch(API + '/materials', { method: 'POST', headers: authHeaders(), body: JSON.stringify(body) });
     }
     if (fileInput) fileInput.value = '';
-    showToast('Material added', 'success');
-    loadMaterials();
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      showToast(j.error || 'Add failed', 'error');
+      return;
+    }
+    document.getElementById('mat-name').value = '';
+    document.getElementById('mat-content').value = '';
+    showToast('Material added (auto-attached to default pool if nick/avatar/about)', 'success');
+    loadMaterialsTab();
+  }
+
+  async function editMaterial(id) {
+    const m = _materialsCache.find(x => x.id === id) || (await fetch(API + '/materials/' + id, { headers: authHeaders() }).then(r => r.json()).then(j => j.data));
+    if (!m) return showToast('Not found', 'error');
+
+    const isFileType = m.type === 'avatar' || m.type === 'audio';
+    const preview = m.type === 'avatar' && m.content
+      ? `<div style="margin:6px 0"><img src="/uploads/${escapeHtml(m.content)}" style="max-height:64px;border-radius:8px" onerror="this.style.display='none'"/></div>`
+      : '';
+    showNotification({
+      title: 'Edit material',
+      message: `<span class="badge">${escapeHtml(m.type)}</span> ${escapeHtml(m.name || '')}${preview}`,
+      type: 'info',
+      inputs: [
+        { name: 'name', label: 'Name', type: 'text', value: m.name || '' },
+        ...(isFileType
+          ? [{ name: 'file', label: m.type === 'avatar' ? 'Replace image (optional)' : 'Replace audio (optional)', type: 'file', accept: m.type === 'avatar' ? 'image/*' : 'audio/*' }]
+          : [{ name: 'content', label: 'Content', type: 'text', value: m.content || '' }]),
+        { name: 'notes', label: 'Notes', type: 'text', value: m.notes || '' },
+        { name: 'is_active', label: 'Active', type: 'select', value: m.is_active === false ? 'false' : 'true', options: [
+          { value: 'true', label: 'Active' },
+          { value: 'false', label: 'Inactive (hidden from warming)' },
+        ]},
+      ],
+      onConfirm: async (vals, files = {}) => {
+        const file = files.file;
+        if (file) {
+          const fd = new FormData();
+          fd.append('name', vals.name || m.name || '');
+          fd.append('notes', vals.notes || '');
+          fd.append('is_active', vals.is_active !== 'false' ? 'true' : 'false');
+          fd.append('file', file);
+          const res = await fetch(API + '/materials/' + id, {
+            method: 'PATCH',
+            headers: { 'Authorization': 'Bearer ' + TOKEN },
+            body: fd,
+          });
+          if (res.ok) showToast('Material updated (file replaced)', 'success');
+          else showToast('Update failed', 'error');
+        } else {
+          const body = {
+            name: vals.name,
+            notes: vals.notes,
+            is_active: vals.is_active !== 'false',
+          };
+          if (!isFileType) body.content = vals.content;
+          const res = await fetch(API + '/materials/' + id, {
+            method: 'PATCH', headers: authHeaders(),
+            body: JSON.stringify(body),
+          });
+          if (res.ok) showToast('Material updated', 'success');
+          else showToast('Update failed', 'error');
+        }
+        loadMaterialsTab();
+      },
+    });
   }
 
   async function delMaterial(id) {
-    showConfirm('Delete this material?', async () => {
+    showConfirm('Delete this material from the library? It will also leave any profile pools.', async () => {
       await fetch(API + '/materials/' + id, { method: 'DELETE', headers: authHeaders() });
       showToast('Material deleted', 'success');
-      loadMaterials();
+      loadMaterialsTab();
     }, true);
   }
 
