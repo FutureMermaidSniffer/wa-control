@@ -395,7 +395,8 @@ sessionEngine.on('message.status', async (payload) => {
           ? 'WhatsApp reach-out locked (463) — not accepted for immediate delivery'
           : `WA error ${errorCode || status}`)
         : null,
-      waStatus: status,
+      // only numeric Baileys statuses (PENDING=1, SERVER_ACK=2, …)
+      waStatus: (typeof status === 'number' && Number.isFinite(status)) ? status : null,
       rawPatch: { lastStatus: status, errorCode, remoteJid },
     });
 

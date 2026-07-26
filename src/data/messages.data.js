@@ -201,7 +201,10 @@ export async function createMessage(data) {
     raw: data.raw || null,
     delivery_status: data.delivery_status || (data.direction === 'out' ? 'pending' : null),
     fail_reason: data.fail_reason || null,
-    wa_status: data.wa_status ?? null,
+    // integer column only — reject soft strings like "timeout_ok"
+    wa_status: (typeof data.wa_status === 'number' && Number.isFinite(data.wa_status))
+      ? data.wa_status
+      : null,
   };
 
   // Dedup: if same WA id already stored (desk insert + Baileys upsert), update not double-insert
@@ -280,7 +283,9 @@ export async function updateMessageDeliveryByWaId(wsAccountId, waMessageId, {
   const patch = { updated_at: db.fn.now() };
   if (deliveryStatus) patch.delivery_status = deliveryStatus;
   if (failReason != null) patch.fail_reason = failReason;
-  if (waStatus != null) patch.wa_status = waStatus;
+  if (typeof waStatus === 'number' && Number.isFinite(waStatus)) {
+    patch.wa_status = waStatus;
+  }
   if (rawPatch && typeof rawPatch === 'object') {
     patch.raw = { ...(row.raw || {}), ...rawPatch };
   }

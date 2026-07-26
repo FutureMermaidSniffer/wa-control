@@ -12,6 +12,24 @@ import config from '../../config/index.js';
 const avatarCache = new Map();
 const AVATAR_TTL_MS = 6 * 60 * 60 * 1000;
 
+/**
+ * messages.wa_status is INTEGER (Baileys WAMessageStatus).
+ * Soft ack objects use status: 'timeout_ok' | 'no_id' — never write those as wa_status.
+ * @returns {number|null}
+ */
+function numericWaStatus(ackOrStatus) {
+  if (ackOrStatus == null) return null;
+  // full ack object from SessionManager
+  if (typeof ackOrStatus === 'object') {
+    if (ackOrStatus.soft) return null;
+    const s = ackOrStatus.status;
+    if (typeof s === 'number' && Number.isFinite(s)) return s;
+    return null;
+  }
+  if (typeof ackOrStatus === 'number' && Number.isFinite(ackOrStatus)) return ackOrStatus;
+  return null;
+}
+
 export async function listConversations(req, res, next) {
   try {
     const { accountId } = req.params;
@@ -302,7 +320,7 @@ export async function sendMessage(req, res, next) {
             fail_reason: null,
             wa_message_id: result?.key?.id || recentFail.wa_message_id,
             media: mediaMeta || recentFail.media,
-            wa_status: result?.ack?.status ?? null,
+            wa_status: numericWaStatus(result?.ack),
             updated_at: db.fn.now(),
             raw: {
               ...(recentFail.raw || {}),
@@ -329,7 +347,7 @@ export async function sendMessage(req, res, next) {
         timestamp: new Date(),
         delivery_status: deliveryStatus,
         fail_reason: sendError || null,
-        wa_status: result?.ack?.status ?? null,
+        wa_status: numericWaStatus(result?.ack),
         raw: {
           ...(sendError ? { sendError, failed: true, errorCode } : {}),
           sendTo,
