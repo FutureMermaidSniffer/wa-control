@@ -60,7 +60,7 @@ export async function getMaterial(req, res, next) {
 
 export async function createMaterial(req, res, next) {
   try {
-    const { type, name, content, notes, is_active } = req.body;
+    const { type, name, content, notes, is_active, pool_id, attach_to_default } = req.body;
     let finalContent = content;
     let mime_type = null;
 
@@ -88,15 +88,34 @@ export async function createMaterial(req, res, next) {
       created_by: req.user?.id,
     });
 
-    // Auto-attach to default pool for nickname/avatar/about so warming sees new assets
-    if (['nickname', 'avatar', 'about', 'status'].includes(type)) {
+    // Explicit destination control:
+    // - pool_id set → attach to that pool only
+    // - attach_to_default false / "false" / "0" → library only (no pool)
+    // - default (omit): auto-attach nick/avatar/about/status to default pool
+    const profileTypes = ['nickname', 'avatar', 'about', 'status'];
+    let attachedPoolId = null;
+    const explicitPoolId = pool_id && String(pool_id).trim() ? String(pool_id).trim() : null;
+    const skipDefault =
+      attach_to_default === false ||
+      attach_to_default === 'false' ||
+      attach_to_default === 0 ||
+      attach_to_default === '0';
+
+    if (explicitPoolId) {
+      await profilePoolsData.addItems(explicitPoolId, [mat.id]).catch(() => {});
+      attachedPoolId = explicitPoolId;
+    } else if (!skipDefault && profileTypes.includes(type)) {
       const def = await profilePoolsData.getDefaultPoolWithMaterials().catch(() => null);
       if (def?.id) {
         await profilePoolsData.addItems(def.id, [mat.id]).catch(() => {});
+        attachedPoolId = def.id;
       }
     }
 
-    res.status(201).json({ data: mat });
+    res.status(201).json({
+      data: mat,
+      attached_pool_id: attachedPoolId,
+    });
   } catch (e) { next(e); }
 }
 
